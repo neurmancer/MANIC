@@ -1,18 +1,7 @@
+#include "internal.h"
 #include <GL/glu.h>
 #include <stdint.h>
 #include <stdlib.h>
-
-typedef struct {
-    ManicVec2 *points;
-    size_t count;
-    int closed;
-} TessContour;
-
-typedef struct {
-    ManicVec2 *vertices;
-    size_t count;
-    size_t capacity;
-} TessMesh;
 
 typedef struct {
     TessMesh mesh;
@@ -122,7 +111,7 @@ static void tess_error_callback(GLenum error, void *data)
     context->failed = 1;
 }
 
-static int tessellate_contours(const TessContour *contours, size_t count, PathFillRule rule, TessMesh *mesh)
+int tessellate_contours(const TessContour *contours, size_t count, PathFillRule rule, TessMesh *mesh)
 {
     TessContext context = {0};
     GLUtesselator *tess = gluNewTess();

@@ -1,4 +1,45 @@
+#include "internal.h"
 #include <string.h>
+
+struct TimelineCheckpoint {
+    double time;
+    int action;
+    Mobject *mobjects;
+};
+
+void timeline_invalidate_checkpoints(Timeline *timeline)
+{
+    for(int i = 0; i < timeline->checkpoint_count; i++) {free(timeline->checkpoints[i].mobjects);}
+    free(timeline->checkpoints);
+    timeline->checkpoints = NULL;
+    timeline->checkpoint_count = 0;
+    timeline->checkpoint_capacity = 0;
+}
+
+static void timeline_checkpoint(Timeline *timeline, const Scene *scene)
+{
+    TimelineCheckpoint *items;
+    Mobject *snapshot;
+
+    if(timeline->checkpoint_count &&
+        timeline->checkpoints[timeline->checkpoint_count - 1].action >= timeline->current_action) {return;}
+    if(timeline->checkpoint_count == timeline->checkpoint_capacity) {
+        int capacity;
+
+        if(timeline->checkpoint_capacity > INT_MAX / 2) {return;}
+        capacity = timeline->checkpoint_capacity ? timeline->checkpoint_capacity * 2 : 8;
+        if(capacity < timeline->checkpoint_capacity || (size_t)capacity > SIZE_MAX / sizeof(*items)) {return;}
+        items = realloc(timeline->checkpoints, (size_t)capacity * sizeof(*items));
+        if(!items) {return;}
+        timeline->checkpoints = items;
+        timeline->checkpoint_capacity = capacity;
+    }
+    snapshot = scene->mobject_count ? malloc((size_t)scene->mobject_count * sizeof(*snapshot)) : NULL;
+    if(scene->mobject_count && !snapshot) {return;}
+    if(snapshot) {memcpy(snapshot, scene->mobjects, (size_t)scene->mobject_count * sizeof(*snapshot));}
+    timeline->checkpoints[timeline->checkpoint_count++] =
+        (TimelineCheckpoint){timeline->elapsed, timeline->current_action, snapshot};
+}
 
 static int timeline_reserve_action(Timeline *timeline)
 {
@@ -88,15 +129,32 @@ int timeline_play_many(Timeline *timeline, const Scene *scene, const Animation *
     }
     action.animations = malloc((size_t)count * sizeof(*action.animations));
     action.starting_mobjects = malloc((size_t)count * sizeof(*action.starting_mobjects));
+    action.caches = calloc((size_t)count, sizeof(*action.caches));
     action.animation_started = calloc((size_t)count, sizeof(*action.animation_started));
-    if(action.animations == NULL || action.starting_mobjects == NULL || action.animation_started == NULL ||
+    if(action.animations == NULL || action.starting_mobjects == NULL || action.animation_started == NULL || action.caches == NULL ||
         !timeline_reserve_action(timeline)) {
         free(action.animations);
         free(action.starting_mobjects);
         free(action.animation_started);
+        free(action.caches);
         return(0);
     }
     memcpy(action.animations, animations, (size_t)count * sizeof(*animations));
+    for(int i = 0; i < count; i++) {
+        if(animations[i].type == ANIMATION_FOLLOW_CURVE) {
+            Bezier curve = {.degree = animations[i].curve_degree};
+            memcpy(curve.points, animations[i].curve_points, sizeof(curve.points));
+            action.caches[i].arc_lengths = malloc(129 * sizeof(double));
+            if(!action.caches[i].arc_lengths || !bezier_arc_table(&curve, action.caches[i].arc_lengths)) {
+                for(int j = 0; j <= i; j++) {free(action.caches[j].arc_lengths);}
+                free(action.caches);
+                free(action.animations);
+                free(action.starting_mobjects);
+                free(action.animation_started);
+                return(0);
+            }
+        }
+    }
     action.animation_count = count;
     timeline->actions[timeline->action_count++] = action;
     return(1);
@@ -125,6 +183,7 @@ static int timeline_visibility(Scene *scene, int node, int show, int initially_h
     action.node = node;
     timeline->actions[timeline->action_count++] = action;
     if(initially_hidden) {
+        timeline_invalidate_checkpoints(timeline);
         scene->mobjects[slot].active = 0;
         if(timeline->initialized) {timeline->initial_mobjects[slot].active = 0;}
     }
@@ -146,7 +205,7 @@ int scene_schedule_show(Scene *scene, int node)
     return(timeline_visibility(scene, node, 1, 0));
 }
 
-static void timeline_apply_action(SceneAction *action, Scene *scene, double elapsed)
+static int timeline_apply_action(SceneAction *action, Scene *scene, double elapsed)
 {
     for(int pass = 0; pass < 2; pass++) {
         for(int i = 0; i < action->animation_count; i++) {
@@ -159,6 +218,22 @@ static void timeline_apply_action(SceneAction *action, Scene *scene, double elap
                 (pass == 0 && action->animation_started[i] == 0) ||
                 (pass == 1 && action->animation_started[i] != 0)) {continue;}
             if(!action->animation_started[i]) {
+                if(animation->type == ANIMATION_MORPH) {
+                    const Mobject *start = &scene->mobjects[slot];
+                    const VectorPath *source = start->morph_alpha >= 1.0f && start->morph_target ? start->morph_target : start->path;
+                    int target_slot = scene_slot(scene, animation->target_mobject_index);
+                    if(target_slot >= 0) {
+                        const VectorPath *target = scene->mobjects[target_slot].path;
+                        MorphCache *item = action->caches[i].morphs;
+                        while(item && (item->source != source || item->target != target)) {item = item->next;}
+                        if(!item) {
+                            item = morph_cache_create(source, target);
+                            if(!item) {return(0);}
+                            item->next = action->caches[i].morphs;
+                            action->caches[i].morphs = item;
+                        }
+                    }
+                }
                 action->starting_mobjects[i] = scene->mobjects[slot];
                 action->animation_started[i] = 1;
             }
@@ -166,11 +241,12 @@ static void timeline_apply_action(SceneAction *action, Scene *scene, double elap
             if(elapsed >= animation->offset + animation->duration) {alpha = 1.0f;}
             if(scene->mobjects[slot].active) {
                 animation_interpolate(animation, &action->starting_mobjects[i],
-                    &scene->mobjects[slot], scene, alpha);
+                    &scene->mobjects[slot], scene, &action->caches[i], alpha);
             }
             if(alpha >= 1.0f) {action->animation_started[i] = 2;}
         }
     }
+    return(1);
 }
 
 int timeline_update(Timeline *timeline, Scene *scene, double dt)
@@ -202,7 +278,7 @@ int timeline_update(Timeline *timeline, Scene *scene, double dt)
             }
             for(int i = 0; i < action->animation_count; i++) {action->animation_started[i] = 0;}
             timeline->action_started = 1;
-            timeline_apply_action(action, scene, 0.0f);
+            if(!timeline_apply_action(action, scene, 0.0f)) {return(0);}
         }
         remaining = action->duration - timeline->action_elapsed;
         advance = dt < remaining ? dt : remaining;
@@ -215,8 +291,9 @@ int timeline_update(Timeline *timeline, Scene *scene, double dt)
             }
         }
         timeline->action_elapsed += advance;
+        timeline->elapsed += advance;
         dt -= advance;
-        timeline_apply_action(action, scene, timeline->action_elapsed);
+        if(!timeline_apply_action(action, scene, timeline->action_elapsed)) {return(0);}
         if(timeline->action_elapsed < action->duration) {
             if(dt > 0.0f && advance > 0.0f) {continue;}
             break;
@@ -224,6 +301,7 @@ int timeline_update(Timeline *timeline, Scene *scene, double dt)
         timeline->current_action++;
         timeline->action_elapsed = 0.0f;
         timeline->action_started = 0;
+        timeline_checkpoint(timeline, scene);
     }
     return(1);
 }
@@ -233,39 +311,47 @@ int timeline_seek(Timeline *timeline, Scene *scene, double time)
 {
     if(!isfinite(time) || time < 0.0f || !timeline->initialized ||
         timeline->initial_count != scene->mobject_count) {return(0);}
+    int low = 0, high = timeline->checkpoint_count;
+    while(low < high) {
+        int mid = low + (high - low) / 2;
+        if(timeline->checkpoints[mid].time <= time) {low = mid + 1;}
+        else {high = mid;}
+    }
+    const TimelineCheckpoint *checkpoint = low ? &timeline->checkpoints[low - 1] : NULL;
+    const Mobject *snapshot = checkpoint ? checkpoint->mobjects : timeline->initial_mobjects;
     for(int i = 0; i < scene->mobject_count; i++) {
         int removed = scene->mobjects[i].removed;
         int parent = scene->mobjects[i].parent;
         int layer = scene->mobjects[i].layer;
-
-        scene->mobjects[i] = timeline->initial_mobjects[i];
+        scene->mobjects[i] = snapshot[i];
         scene->mobjects[i].removed = removed;
         if(removed) {scene->mobjects[i].active = 0;}
         scene->mobjects[i].parent = parent;
         scene->mobjects[i].layer = layer;
     }
-    timeline->current_action = 0;
-    timeline->action_elapsed = 0.0f;
+    timeline->current_action = checkpoint ? checkpoint->action : 0;
+    timeline->elapsed = checkpoint ? checkpoint->time : 0;
+    timeline->action_elapsed = 0;
     timeline->action_started = 0;
-    return(timeline_update(timeline, scene, time));
+    return(timeline_update(timeline, scene, time - timeline->elapsed));
 }
 
-static int scene_play_many(Scene *scene, const Animation *animations, int count)
+int scene_play_many(Scene *scene, const Animation *animations, int count)
 {
     return(timeline_play_many(&scene->timeline, scene, animations, count));
 }
 
-static int scene_play(Scene *scene, Animation animation)
+int scene_play(Scene *scene, Animation animation)
 {
     return(scene_play_many(scene, &animation, 1));
 }
 
-static int scene_wait(Scene *scene, float duration)
+int scene_wait(Scene *scene, float duration)
 {
     return(timeline_wait(&scene->timeline, duration));
 }
 
-static int scene_update(Scene *scene, double dt)
+int scene_update(Scene *scene, double dt)
 {
     return(timeline_update(&scene->timeline, scene, dt));
 }

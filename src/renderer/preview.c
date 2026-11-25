@@ -1,21 +1,10 @@
+#include "internal.h"
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-typedef struct {
-    int width;
-    int height;
-    int fps;
-    ManicColor background;
-    const char *frames_directory;
-    const char *scene_name;
-    int supersample;
-    const char *video_path;
-    unsigned long long video_intervals;
-} RenderConfig;
-
-static RenderConfig render_config_default(void)
+RenderConfig render_config_default(void)
 {
     RenderConfig config = {1280, 720, 60, {20, 22, 29, 255}, NULL, "first", 2, NULL, 0};
 
@@ -51,7 +40,7 @@ static int parse_background(const char *value, ManicColor *color)
     return(1);
 }
 
-static int render_config_parse(RenderConfig *config, int argc, char **argv)
+int render_config_parse(RenderConfig *config, int argc, char **argv)
 {
     for(int i = 1; i < argc; i++) {
         const char *option = argv[i];
@@ -95,7 +84,7 @@ static int render_config_parse(RenderConfig *config, int argc, char **argv)
     return(1);
 }
 
-static int scene_preview(Scene *scene, const RenderConfig *config)
+int scene_preview(Scene *scene, const RenderConfig *config)
 {
     scene->camera.background = config->background;
     SetConfigFlags(FLAG_MSAA_4X_HINT);

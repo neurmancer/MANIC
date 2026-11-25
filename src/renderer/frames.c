@@ -1,3 +1,4 @@
+#include "internal.h"
 #include <errno.h>
 #include <dirent.h>
 #include <float.h>
@@ -5,7 +6,7 @@
 
 #define MAX_EXPORT_INTERVALS 10000000ULL
 
-static int scene_frame_intervals(const Scene *scene, int fps, unsigned long long *intervals)
+int scene_frame_intervals(const Scene *scene, int fps, unsigned long long *intervals)
 {
     double duration = 0.0;
     double count;
@@ -33,7 +34,7 @@ static int frame_path(char *path, size_t size, const char *directory, unsigned l
     return(length >= 0 && (size_t)length < size);
 }
 
-static int scene_export_frames(Scene *scene, const RenderConfig *config)
+int scene_export_frames(Scene *scene, const RenderConfig *config)
 {
     unsigned long long intervals;
     size_t path_size = strlen(config->frames_directory) + 64;

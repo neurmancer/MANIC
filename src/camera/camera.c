@@ -1,17 +1,18 @@
+#include "internal.h"
 #include <math.h>
 #include <raylib.h>
 
-static Vector2 raylib_vector(ManicVec2 vector)
+Vector2 raylib_vector(ManicVec2 vector)
 {
     return((Vector2){vector.x, vector.y});
 }
 
-static Color raylib_color(ManicColor color)
+Color raylib_color(ManicColor color)
 {
     return((Color){color.r, color.g, color.b, color.a});
 }
 
-static ManicVec2 camera_to_screen(const ManicCamera *camera, ManicVec2 point, int width, int height)
+ManicVec2 camera_to_screen(const ManicCamera *camera, ManicVec2 point, int width, int height)
 {
     float scale = (float)height / camera->frame_height;
     ManicVec2 screen = {
@@ -22,7 +23,7 @@ static ManicVec2 camera_to_screen(const ManicCamera *camera, ManicVec2 point, in
     return(screen);
 }
 
-static ManicVec2 camera_world_point(const Mobject *mobjects, int node, ManicVec2 point)
+ManicVec2 camera_world_point(const Mobject *mobjects, int node, ManicVec2 point)
 {
     int parent = mobjects[node].parent;
 
@@ -40,8 +41,6 @@ static ManicVec2 camera_world_point(const Mobject *mobjects, int node, ManicVec2
     return(point);
 }
 
-#include "../renderer/tessellation.c"
-#include "../renderer/path.c"
 
 typedef struct {
     int index;
@@ -113,7 +112,7 @@ static int camera_capture(const ManicCamera *camera, const Mobject *mobjects, in
     return(1);
 }
 
-static int scene_render(const Scene *scene, int width, int height, float pixel_scale)
+int scene_render(const Scene *scene, int width, int height, float pixel_scale)
 {
     return(camera_capture(&scene->camera, scene->mobjects, scene->mobject_count, width, height, pixel_scale));
 }

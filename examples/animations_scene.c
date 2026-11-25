@@ -1,4 +1,5 @@
-static int animations_scene_build(Scene *scene)
+#include "manic.h"
+int animations_scene_build(Scene *scene)
 {
     VectorPath square = {0};
     VectorPath diamond = {0};

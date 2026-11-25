@@ -1,3 +1,4 @@
+#include "internal.h"
 #include <float.h>
 #include <limits.h>
 #include <math.h>
@@ -5,35 +6,12 @@
 #include <stdlib.h>
 #include <string.h>
 
-typedef struct {
-    int degree;
-    ManicVec2 points[4];
-    int starts_subpath;
-    int closes_subpath;
-} Bezier;
-
-typedef struct {
-    ManicVec2 min;
-    ManicVec2 max;
-} PathBounds;
-
-struct VectorPath {
-    Bezier *segments;
-    size_t count;
-    size_t capacity;
-    ManicVec2 current;
-    ManicVec2 subpath_start;
-    int has_current;
-    int new_subpath;
-    int closed;
-};
-
-static int vector_valid(ManicVec2 point)
+int vector_valid(ManicVec2 point)
 {
     return(isfinite(point.x) && isfinite(point.y));
 }
 
-static ManicVec2 vector_lerp(ManicVec2 a, ManicVec2 b, double t)
+ManicVec2 vector_lerp(ManicVec2 a, ManicVec2 b, double t)
 {
     ManicVec2 point = {
         (float)((double)a.x + ((double)b.x - a.x) * t),
@@ -496,16 +474,9 @@ static int bezier_interval(const Bezier *curve, double begin, double end, Bezier
     return(1);
 }
 
-int path_interpolate(const VectorPath *a, const VectorPath *b, float alpha, VectorPath *output)
+static int path_interpolate_matched(const VectorPath *a, const VectorPath *b, float alpha,
+    VectorPath *output, MorphSubpath *source, MorphSubpath *target, size_t *matching, size_t count)
 {
-    MorphSubpath *source = NULL;
-    MorphSubpath *target = NULL;
-    size_t *matching = NULL;
-    size_t count = 0;
-    int success = 0;
-
-    if(output == NULL || output == a || output == b || !isfinite(alpha) || alpha < 0 || alpha > 1 ||
-        !path_match_subpaths(a, b, &source, &target, &matching, &count)) {return(0);}
     for(size_t subpath = 0; subpath < count; subpath++) {
         MorphSubpath *left = &source[subpath];
         MorphSubpath *right = &target[matching[subpath]];
@@ -516,7 +487,7 @@ int path_interpolate(const VectorPath *a, const VectorPath *b, float alpha, Vect
         size_t nb = right->end - right->start;
 
         if(!path_move_to(output, vector_lerp(a->segments[left->start].points[0],
-            b->segments[right->start].points[0], alpha))) {goto cleanup;}
+            b->segments[right->start].points[0], alpha))) {return(0);}
         while(sa < na && sb < nb) {
             double nexta = (double)(sa + 1) / na;
             double nextb = (double)(sb + 1) / nb;
@@ -526,48 +497,109 @@ int path_interpolate(const VectorPath *a, const VectorPath *b, float alpha, Vect
             ManicVec2 points[4];
 
             if(!bezier_interval(&a->segments[left->start + sa], t * na - sa, next * na - sa, &ca) ||
-                !bezier_interval(&b->segments[right->start + sb], t * nb - sb, next * nb - sb, &cb)) {goto cleanup;}
+                !bezier_interval(&b->segments[right->start + sb], t * nb - sb, next * nb - sb, &cb)) {return(0);}
             for(int j = 0; j < 4; j++) {points[j] = vector_lerp(ca.points[j], cb.points[j], alpha);}
-            if(!path_cubic_to(output, points[1], points[2], points[3])) {goto cleanup;}
+            if(!path_cubic_to(output, points[1], points[2], points[3])) {return(0);}
             t = next;
             if(nexta <= nextb) {sa++;}
             if(nextb <= nexta) {sb++;}
         }
         if(left->closed) {output->segments[output->count - 1].closes_subpath = 1; output->closed = 1;}
     }
-    success = 1;
+    return(1);
+}
 
-cleanup:
+int path_interpolate(const VectorPath *a, const VectorPath *b, float alpha, VectorPath *output)
+{
+    MorphSubpath *source = NULL, *target = NULL;
+    size_t *matching = NULL, count = 0;
+    int success;
+
+    if(output == NULL || output == a || output == b || !isfinite(alpha) || alpha < 0 || alpha > 1 ||
+        !path_match_subpaths(a, b, &source, &target, &matching, &count)) {return(0);}
+    success = path_interpolate_matched(a, b, alpha, output, source, target, matching, count);
     free(source);
     free(target);
     free(matching);
     return(success);
 }
 
-double bezier_arc_parameter(const Bezier *curve, double fraction)
+MorphCache *morph_cache_create(const VectorPath *a, const VectorPath *b)
 {
-    double lengths[129] = {0};
-    ManicVec2 previous;
-    ManicVec2 point;
-    double wanted;
+    MorphSubpath *source = NULL, *target = NULL;
+    size_t *matching = NULL, count = 0;
+    MorphCache *cache = calloc(1, sizeof(*cache));
+    int ok = cache && path_match_subpaths(a, b, &source, &target, &matching, &count);
 
-    if(fraction <= 0.0) {return(0.0);}
-    if(fraction >= 1.0) {return(1.0);}
-    if(!bezier_evaluate(curve, 0.0, &previous)) {return(fraction);}
+    if(ok) {
+        ok = path_interpolate_matched(a, b, 0, &cache->left, source, target, matching, count) &&
+            path_interpolate_matched(a, b, 1, &cache->right, source, target, matching, count);
+    }
+    free(source);
+    free(target);
+    free(matching);
+    if(!ok) {
+        if(cache) {
+            path_destroy(&cache->left);
+            path_destroy(&cache->right);
+            free(cache);
+        }
+        return(NULL);
+    }
+    cache->source = a;
+    cache->target = b;
+    return(cache);
+}
+
+int path_interpolate_cached(const MorphCache *cache, float alpha, VectorPath *output)
+{
+    if(!path_clone(output, &cache->left)) {return(0);}
+    for(size_t i = 0; i < output->count; i++) {
+        for(int j = 0; j <= output->segments[i].degree; j++) {
+            output->segments[i].points[j] = vector_lerp(cache->left.segments[i].points[j],
+                cache->right.segments[i].points[j], alpha);
+        }
+    }
+    return(1);
+}
+
+int bezier_arc_table(const Bezier *curve, double lengths[129])
+{
+    ManicVec2 previous, point;
+
+    lengths[0] = 0;
+    if(!bezier_evaluate(curve, 0, &previous)) {return(0);}
     for(int i = 1; i <= 128; i++) {
-        if(!bezier_evaluate(curve, (double)i / 128, &point)) {return(fraction);}
+        if(!bezier_evaluate(curve, (double)i / 128, &point)) {return(0);}
         lengths[i] = lengths[i - 1] + hypot((double)point.x - previous.x, (double)point.y - previous.y);
         previous = point;
     }
-    if(lengths[128] == 0.0) {return(fraction);}
-    wanted = lengths[128] * fraction;
-    for(int i = 1; i <= 128; i++) {
-        if(lengths[i] >= wanted) {
-            double span = lengths[i] - lengths[i - 1];
-            double position = span > 0.0 ? (wanted - lengths[i - 1]) / span : 0.0;
+    return(1);
+}
 
-            return(((double)(i - 1) + position) / 128.0);
-        }
+double bezier_arc_lookup(const double lengths[129], double fraction)
+{
+    double wanted;
+    int low = 1, high = 128;
+    double span;
+
+    if(fraction <= 0) {return(0);}
+    if(fraction >= 1) {return(1);}
+    if(lengths[128] == 0) {return(fraction);}
+    wanted = lengths[128] * fraction;
+    while(low < high) {
+        int mid = low + (high - low) / 2;
+
+        if(lengths[mid] < wanted) {low = mid + 1;}
+        else {high = mid;}
     }
-    return(1.0);
+    span = lengths[low] - lengths[low - 1];
+    return(((double)(low - 1) + (span > 0 ? (wanted - lengths[low - 1]) / span : 0)) / 128);
+}
+
+double bezier_arc_parameter(const Bezier *curve, double fraction)
+{
+    double lengths[129];
+
+    return(bezier_arc_table(curve, lengths) ? bezier_arc_lookup(lengths, fraction) : fraction);
 }

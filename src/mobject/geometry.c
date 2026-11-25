@@ -1,4 +1,5 @@
-static Mobject circle_create(ManicVec2 position, float radius, ManicColor color)
+#include "internal.h"
+Mobject circle_create(ManicVec2 position, float radius, ManicColor color)
 {
     Mobject circle = {0};
 
@@ -11,7 +12,7 @@ static Mobject circle_create(ManicVec2 position, float radius, ManicColor color)
     return(circle);
 }
 
-static Mobject line_create(ManicVec2 start, ManicVec2 end, ManicColor color)
+Mobject line_create(ManicVec2 start, ManicVec2 end, ManicColor color)
 {
     Mobject line = {0};
 

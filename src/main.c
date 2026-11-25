@@ -1,21 +1,4 @@
-#define _POSIX_C_SOURCE 200809L
-#include "core/types.c"
-#include "mobject/geometry.c"
-#include "vector/path.c"
-#include "animation/animation.c"
-#include "scene/scene.c"
-#include "animation/timeline.c"
-#include "math/coordinates.c"
-#include "camera/camera.c"
-#include "renderer/preview.c"
-#include "renderer/frames.c"
-#include "renderer/video.c"
-#include "../examples/first_scene.c"
-#include "../examples/benchmark_scene.c"
-#include "../examples/paths_scene.c"
-#include "../examples/animations_scene.c"
-#include "../examples/math_scene.c"
-
+#include "internal.h"
 int main(int argc, char **argv)
 {
     Scene scene = {0};

@@ -1,3 +1,4 @@
+#include "internal.h"
 #include <stddef.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -12,7 +13,7 @@ Mobject *scene_get(Scene *scene, int handle)
     return(&scene->mobjects[slot]);
 }
 
-static int scene_add(Scene *scene, Mobject mobject)
+int scene_add(Scene *scene, Mobject mobject)
 {
     int slot = -1;
     unsigned int generation = 0;
@@ -72,6 +73,7 @@ static int scene_add(Scene *scene, Mobject mobject)
         }
         scene->timeline.initial_mobjects[slot] = mobject;
     }
+    timeline_invalidate_checkpoints(&scene->timeline);
     scene->mobjects[slot] = mobject;
     if(slot == scene->mobject_count) {scene->mobject_count++;}
     scene->next_order++;
@@ -102,6 +104,7 @@ int scene_remove(Scene *scene, int node)
     int slot = scene_slot(scene, node);
 
     if(slot < 0 || scene->mobjects[slot].removed) {return(0);}
+    timeline_invalidate_checkpoints(&scene->timeline);
     for(int i = 0; i < scene->mobject_count; i++) {
         int ancestor = (int)((scene->mobjects[i].generation << MANIC_SLOT_BITS) | (unsigned int)i);
 
@@ -159,6 +162,7 @@ int scene_collect_removed(Scene *scene)
             }
         }
         if(referenced) {continue;}
+        timeline_invalidate_checkpoints(&scene->timeline);
         if(path != NULL) {path_destroy(path); free(path);}
         scene->mobjects[node].path = NULL;
         scene->mobjects[node].reusable = 1;
@@ -171,13 +175,28 @@ int scene_collect_removed(Scene *scene)
     return(collected);
 }
 
-static void scene_destroy(Scene *scene)
+void scene_destroy(Scene *scene)
 {
     for(int i = 0; i < scene->timeline.action_count; i++) {
+        for(int j = 0; j < scene->timeline.actions[i].animation_count; j++) {
+            AnimationCache *cache = &scene->timeline.actions[i].caches[j];
+            MorphCache *item = cache->morphs;
+            free(cache->arc_lengths);
+            while(item) {
+                MorphCache *next = item->next;
+
+                path_destroy(&item->left);
+                path_destroy(&item->right);
+                free(item);
+                item = next;
+            }
+        }
+        free(scene->timeline.actions[i].caches);
         free(scene->timeline.actions[i].animations);
         free(scene->timeline.actions[i].starting_mobjects);
         free(scene->timeline.actions[i].animation_started);
     }
+    timeline_invalidate_checkpoints(&scene->timeline);
     free(scene->timeline.actions);
     free(scene->timeline.initial_mobjects);
     for(int i = 0; i < scene->mobject_count; i++) {

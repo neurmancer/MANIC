@@ -1,10 +1,11 @@
+#include "manic.h"
 static double math_scene_parabola(double x, void *context)
 {
     (void)context;
     return(x * x / 2.0);
 }
 
-static int math_scene_build(Scene *scene)
+int math_scene_build(Scene *scene)
 {
     MathAxes axes = {.x_min = -3, .x_max = 3, .y_min = -1, .y_max = 5, .width = 7, .height = 6};
     ManicColor axis_color = {200, 205, 215, 255};
@@ -25,7 +26,7 @@ static int math_scene_build(Scene *scene)
         !axes_point(&axes, 2, 2, &end)) {return(1);}
     dot = scene_add(scene, circle_create(start, 0.12f, dot_color));
     if(dot < 0 || !scene_set_parent(scene, dot, axes.group)) {return(1);}
-    scene->mobjects[scene_slot(scene, graph)].path_progress = 0;
+    scene_get(scene, graph)->path_progress = 0;
     curve.points[0] = start;
     curve.points[1] = control;
     curve.points[2] = end;

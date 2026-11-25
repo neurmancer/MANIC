@@ -1,6 +1,7 @@
+#include "internal.h"
 #include <math.h>
 
-static Animation animation_move_to(int mobject_index, ManicVec2 end, float duration)
+Animation animation_move_to(int mobject_index, ManicVec2 end, float duration)
 {
     Animation animation = {0};
 
@@ -11,7 +12,7 @@ static Animation animation_move_to(int mobject_index, ManicVec2 end, float durat
     return(animation);
 }
 
-static Animation animation_fade_to(int mobject_index, unsigned char opacity, float duration)
+Animation animation_fade_to(int mobject_index, unsigned char opacity, float duration)
 {
     Animation animation = {0};
 
@@ -110,8 +111,8 @@ static unsigned char interpolate_channel(unsigned char start, unsigned char end,
     return((unsigned char)(start + ((float)end - start) * alpha + 0.5f));
 }
 
-static void animation_interpolate(const Animation *animation, const Mobject *start,
-    Mobject *mobject, const Scene *scene, float alpha)
+void animation_interpolate(const Animation *animation, const Mobject *start,
+    Mobject *mobject, const Scene *scene, const AnimationCache *cache, float alpha)
 {
     alpha = animation_ease(animation->easing, alpha);
     if(animation->type == ANIMATION_MOVE) {
@@ -172,7 +173,7 @@ static void animation_interpolate(const Animation *animation, const Mobject *sta
         ManicVec2 position;
 
         for(int i = 0; i < 4; i++) {curve.points[i] = animation->curve_points[i];}
-        if(bezier_evaluate(&curve, bezier_arc_parameter(&curve, alpha), &position)) {
+        if(bezier_evaluate(&curve, cache->arc_lengths ? bezier_arc_lookup(cache->arc_lengths, alpha) : bezier_arc_parameter(&curve, alpha), &position)) {
             mobject->position = position;
             if(mobject->type == MOBJECT_LINE) {
                 mobject->end.x = start->end.x + position.x - start->position.x;
@@ -188,6 +189,13 @@ static void animation_interpolate(const Animation *animation, const Mobject *sta
         if(target < 0) {return;}
         mobject->morph_target = scene->mobjects[target].path;
         mobject->morph_alpha = alpha;
+        mobject->morph_cache = NULL;
+        for(const MorphCache *item = cache->morphs; item; item = item->next) {
+            if(item->source == mobject->morph_source && item->target == mobject->morph_target) {
+                mobject->morph_cache = item;
+                break;
+            }
+        }
     }
 }
 

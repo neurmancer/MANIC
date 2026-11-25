@@ -1,4 +1,5 @@
-static int paths_scene_build(Scene *scene)
+#include "manic.h"
+int paths_scene_build(Scene *scene)
 {
     VectorPath curve = {0};
     VectorPath box = {0};

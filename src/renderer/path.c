@@ -1,3 +1,4 @@
+#include "internal.h"
 #include <math.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -195,7 +196,7 @@ static int contour_append(TessContour **contours, size_t *count, size_t *capacit
     return(1);
 }
 
-static int camera_render_path(const ManicCamera *camera, const Mobject *mobjects, int node,
+int camera_render_path(const ManicCamera *camera, const Mobject *mobjects, int node,
     const Mobject *mobject, int width, int height, float pixel_scale)
 {
     const VectorPath *path = mobject->morph_source ? mobject->morph_source : mobject->path;
@@ -209,7 +210,8 @@ static int camera_render_path(const ManicCamera *camera, const Mobject *mobjects
 
     if(path == NULL) {return(0);}
     if(mobject->morph_target != NULL) {
-        if(!path_interpolate(path, mobject->morph_target, mobject->morph_alpha, &interpolated)) {
+        if(!(mobject->morph_cache ? path_interpolate_cached(mobject->morph_cache, mobject->morph_alpha, &interpolated) :
+            path_interpolate(path, mobject->morph_target, mobject->morph_alpha, &interpolated))) {
             path_destroy(&interpolated);
             return(0);
         }

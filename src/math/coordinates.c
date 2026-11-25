@@ -1,17 +1,7 @@
+#include "internal.h"
+#include <float.h>
 #include <math.h>
 #include <stdio.h>
-
-typedef struct {
-    int group;
-    float x_min;
-    float x_max;
-    float y_min;
-    float y_max;
-    float width;
-    float height;
-} MathAxes;
-
-typedef double (*MathFunction)(double x, void *context);
 
 int axes_point(const MathAxes *axes, double x, double y, ManicVec2 *point)
 {
@@ -94,37 +84,166 @@ int scene_axes(Scene *scene, MathAxes *axes, ManicVec2 position, float tick_step
     return(1);
 }
 
-int scene_function_graph(Scene *scene, const MathAxes *axes, MathFunction function, void *context,
-    int samples, ManicColor color)
+typedef struct {
+    const MathAxes *axes;
+    MathFunction function;
+    void *context;
+    VectorPath *path;
+    GraphSampling options;
+    int drawing;
+    int budget;
+} GraphBuilder;
+
+typedef struct {
+    double x;
+    double y;
+} GraphSample;
+
+static int graph_segment(GraphBuilder *graph, GraphSample a, GraphSample b)
+{
+    const MathAxes *axes = graph->axes;
+    ManicVec2 p, q;
+    double t0 = 0, t1 = 1, dy = b.y - a.y;
+
+    if(!isfinite(a.y) || !isfinite(b.y) || !isfinite(dy)) {
+        graph->drawing = 0;
+        return(1);
+    }
+    if(dy == 0) {
+        if(a.y < axes->y_min || a.y > axes->y_max) {
+            graph->drawing = 0;
+            return(1);
+        }
+    }
+    else {
+        double lo = (axes->y_min - a.y) / dy;
+        double hi = (axes->y_max - a.y) / dy;
+
+        if(lo > hi) {
+            double tmp = lo;
+
+            lo = hi;
+            hi = tmp;
+        }
+        if(lo > t0) {t0 = lo;}
+        if(hi < t1) {t1 = hi;}
+        if(t0 > t1 || t1 < 0 || t0 > 1) {
+            graph->drawing = 0;
+            return(1);
+        }
+    }
+    if(!axes_point(axes, a.x + (b.x - a.x) * t0, a.y + dy * t0, &p) ||
+        !axes_point(axes, a.x + (b.x - a.x) * t1, a.y + dy * t1, &q)) {
+        graph->drawing = 0;
+        return(1);
+    }
+    if((!graph->drawing || t0 > 0) && !path_move_to(graph->path, p)) {return(0);}
+    if(!path_line_to(graph->path, q)) {return(0);}
+    graph->drawing = t1 >= 1;
+    return(1);
+}
+
+static int graph_refine(GraphBuilder *graph, GraphSample a, GraphSample b, int depth)
+{
+    GraphSample mid = {(a.x + b.x) * 0.5, 0};
+    double range = (double)graph->axes->y_max - graph->axes->y_min;
+    int split;
+
+    if(graph->budget <= 0) {return(0);}
+    if(mid.x == a.x || mid.x == b.x) {
+        graph->drawing = 0;
+        return(1);
+    }
+    graph->budget--;
+    mid.y = graph->function(mid.x, graph->context);
+    if(isfinite(a.y) && isfinite(mid.y) && isfinite(b.y) &&
+        ((a.y < graph->axes->y_min && mid.y < graph->axes->y_min && b.y < graph->axes->y_min) ||
+         (a.y > graph->axes->y_max && mid.y > graph->axes->y_max && b.y > graph->axes->y_max)) &&
+        fabs(mid.y - (a.y * 0.5 + b.y * 0.5)) <= graph->options.tolerance * range) {
+        graph->drawing = 0;
+        return(1);
+    }
+    split = !isfinite(a.y) || !isfinite(mid.y) || !isfinite(b.y) ||
+        fabs(mid.y - (a.y * 0.5 + b.y * 0.5)) > graph->options.tolerance * range ||
+        fabs(a.y - b.y) > range * 0.5;
+    if(split && depth < graph->options.max_depth) {
+        return(graph_refine(graph, a, mid, depth + 1) && graph_refine(graph, mid, b, depth + 1));
+    }
+    if(split && (!isfinite(a.y) || !isfinite(mid.y) || !isfinite(b.y) ||
+        fabs(a.y - b.y) > range * 0.5 ||
+        fabs(mid.y - (a.y * 0.5 + b.y * 0.5)) > graph->options.tolerance * range * 4)) {
+        graph->drawing = 0;
+        return(1);
+    }
+    return(graph_segment(graph, a, b));
+}
+
+int scene_function_graph_with_breaks(Scene *scene, const MathAxes *axes, MathFunction function, void *context,
+    int samples, GraphSampling options, const double *breaks, size_t break_count, ManicColor color)
 {
     VectorPath path = {0};
-    int drawing = 0;
-    int id = -1;
+    GraphBuilder graph = {axes, function, context, &path, options, 0, 4000000};
+    GraphSample previous;
+    ManicVec2 validation;
+    int id = -1, slot;
+    size_t next_break = 0;
 
-    if(scene == NULL || axes == NULL || function == NULL || samples < 2 || samples > 1000000 ||
-        scene_slot(scene, axes->group) < 0 || !scene->mobjects[scene_slot(scene, axes->group)].active) {return(-1);}
-    for(int i = 0; i < samples; i++) {
-        double x = axes->x_min + ((double)axes->x_max - axes->x_min) * i / (samples - 1);
-        double y = function(x, context);
-        ManicVec2 point;
+    if(!scene || !axes || !function || samples < 2 || samples > 1000000 ||
+        (break_count && !breaks) || options.max_depth < 0 || options.max_depth > 20 ||
+        !isfinite(options.tolerance) || options.tolerance <= 0 ||
+        !axes_point(axes, axes->x_min, axes->y_min, &validation) ||
+        (slot = scene_slot(scene, axes->group)) < 0 || !scene->mobjects[slot].active) {return(-1);}
+    for(size_t i = 0; i < break_count; i++) {
+        if(!isfinite(breaks[i]) || breaks[i] <= axes->x_min || breaks[i] >= axes->x_max ||
+            (i && breaks[i] <= breaks[i - 1])) {return(-1);}
+    }
+    previous = (GraphSample){axes->x_min, function(axes->x_min, context)};
+    for(int i = 1; i < samples; i++) {
+        GraphSample current;
 
-        if(!isfinite(y) || y < axes->y_min || y > axes->y_max || !axes_point(axes, x, y, &point)) {
-            drawing = 0;
-            continue;
+        current.x = axes->x_min + ((double)axes->x_max - axes->x_min) * i / (samples - 1);
+        while(next_break < break_count && breaks[next_break] <= current.x) {
+            double point = breaks[next_break++];
+            double before = nextafter(point, -INFINITY);
+            double after = nextafter(point, INFINITY);
+
+            if(before > previous.x) {
+                GraphSample edge = {before, function(before, context)};
+
+                if(!graph_refine(&graph, previous, edge, 0)) {goto cleanup;}
+            }
+            graph.drawing = 0;
+            previous = (GraphSample){after, function(after, context)};
         }
-        if(!drawing) {
-            if(!path_move_to(&path, point)) {goto cleanup;}
-            drawing = 1;
+        if(current.x > previous.x) {
+            current.y = function(current.x, context);
+            if(!graph_refine(&graph, previous, current, 0)) {goto cleanup;}
+            previous = current;
         }
-        else if(!path_line_to(&path, point)) {goto cleanup;}
     }
     if(path.count == 0) {goto cleanup;}
     id = scene_add(scene, path_mobject(&path, (ManicVec2){0, 0}, color, (ManicColor){0}, 3));
-    if(id >= 0 && !scene_set_parent(scene, id, axes->group)) {scene_remove(scene, id); id = -1;}
+    if(id >= 0 && !scene_set_parent(scene, id, axes->group)) {
+        scene_remove(scene, id);
+        id = -1;
+    }
 
 cleanup:
     path_destroy(&path);
     return(id);
+}
+
+int scene_function_graph_adaptive(Scene *scene, const MathAxes *axes, MathFunction function, void *context,
+    int samples, GraphSampling options, ManicColor color)
+{
+    return(scene_function_graph_with_breaks(scene, axes, function, context, samples, options, NULL, 0, color));
+}
+
+int scene_function_graph(Scene *scene, const MathAxes *axes, MathFunction function, void *context,
+    int samples, ManicColor color)
+{
+    return(scene_function_graph_adaptive(scene, axes, function, context, samples,
+        (GraphSampling){8, 0.001}, color));
 }
 
 static int number_stroke(VectorPath *path, ManicVec2 a, ManicVec2 b)

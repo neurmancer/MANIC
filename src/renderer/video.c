@@ -1,9 +1,11 @@
+#include "internal.h"
+#include <sys/stat.h>
 #include <errno.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
-static int video_output_available(const char *path)
+int video_output_available(const char *path)
 {
     struct stat info;
 
@@ -14,7 +16,7 @@ static int video_output_available(const char *path)
     return(1);
 }
 
-static int encode_video(const RenderConfig *config)
+int encode_video(const RenderConfig *config)
 {
     size_t directory_length = strlen(config->frames_directory);
     size_t video_length = strlen(config->video_path);

@@ -1,4 +1,5 @@
-static int first_scene_build(Scene *scene)
+#include "manic.h"
+int first_scene_build(Scene *scene)
 {
     scene->camera.frame_height = 8.0f;
     Mobject circle = circle_create((ManicVec2){-3.0f, 1.0f}, 0.8f, (ManicColor){0, 121, 241, 255});

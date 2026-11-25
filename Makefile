@@ -1,18 +1,29 @@
 CC ?= cc
+AR ?= ar
 PKG_CONFIG ?= pkg-config
 CFLAGS ?= -O2
 CFLAGS += -std=c99 -Wall -Wextra -Wpedantic
-RAYLIB_CFLAGS := $(shell $(PKG_CONFIG) --cflags raylib glu)
-RAYLIB_LIBS := $(shell $(PKG_CONFIG) --libs raylib glu)
-SOURCES := $(shell find src examples -name '*.c')
+CPPFLAGS += -D_POSIX_C_SOURCE=200809L -Iinclude -Isrc $(shell $(PKG_CONFIG) --cflags raylib glu)
+LIBS := $(shell $(PKG_CONFIG) --libs raylib glu) -lm
+LIB_SOURCES := $(filter-out src/main.c,$(shell find src -name '*.c'))
+EXAMPLE_SOURCES := $(shell find examples -name '*.c')
+LIB_OBJECTS := $(patsubst %.c,build/%.o,$(LIB_SOURCES))
+CLI_OBJECTS := $(patsubst %.c,build/%.o,src/main.c $(EXAMPLE_SOURCES))
 
 .PHONY: all clean
+all: build/manic build/libmanic.a
 
-all: build/manic
+build/manic: $(CLI_OBJECTS) build/libmanic.a
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(CLI_OBJECTS) build/libmanic.a $(LIBS) $(LDLIBS)
 
-build/manic: $(SOURCES)
-	@mkdir -p build
-	$(CC) $(CFLAGS) $(RAYLIB_CFLAGS) src/main.c -o $@ $(LDFLAGS) $(RAYLIB_LIBS) -lm $(LDLIBS)
+build/libmanic.a: $(LIB_OBJECTS)
+	$(AR) rcs $@ $^
+
+build/%.o: %.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -MMD -MP -c $< -o $@
+
+-include $(LIB_OBJECTS:.o=.d) $(CLI_OBJECTS:.o=.d)
 
 clean:
 	rm -rf build

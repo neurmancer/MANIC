@@ -1,4 +1,5 @@
-static int benchmark_scene_build(Scene *scene)
+#include "manic.h"
+int benchmark_scene_build(Scene *scene)
 {
     ManicColor colors[] = {(ManicColor){0, 121, 241, 255}, (ManicColor){102, 191, 255, 255}, (ManicColor){0, 228, 48, 255}, (ManicColor){253, 249, 0, 255}, (ManicColor){255, 161, 0, 255}, (ManicColor){230, 41, 55, 255}, (ManicColor){255, 109, 194, 255}, (ManicColor){200, 122, 255, 255}};
     Animation animations[12];
@@ -18,7 +19,7 @@ static int benchmark_scene_build(Scene *scene)
         if(objects[i] < 0 || !scene_set_parent(scene, objects[i], group)) {return(1);}
     }
     for(int i = 0; i < 12; i++) {
-        ManicVec2 position = scene->mobjects[scene_slot(scene, objects[i])].position;
+        ManicVec2 position = scene_get(scene, objects[i])->position;
 
         position.y = -position.y;
         animations[i] = animation_with_easing(animation_move_to(objects[i], position,
