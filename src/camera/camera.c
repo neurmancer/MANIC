@@ -1,7 +1,20 @@
-static Vector2 camera_to_screen(const ManicCamera *camera, Vector2 point, int width, int height)
+#include <math.h>
+#include <raylib.h>
+
+static Vector2 raylib_vector(ManicVec2 vector)
+{
+    return((Vector2){vector.x, vector.y});
+}
+
+static Color raylib_color(ManicColor color)
+{
+    return((Color){color.r, color.g, color.b, color.a});
+}
+
+static ManicVec2 camera_to_screen(const ManicCamera *camera, ManicVec2 point, int width, int height)
 {
     float scale = (float)height / camera->frame_height;
-    Vector2 screen = {
+    ManicVec2 screen = {
         (float)width / 2.0f + (point.x - camera->position.x) * scale,
         (float)height / 2.0f - (point.y - camera->position.y) * scale
     };
@@ -9,36 +22,98 @@ static Vector2 camera_to_screen(const ManicCamera *camera, Vector2 point, int wi
     return(screen);
 }
 
-static void camera_capture(const ManicCamera *camera, const Mobject *mobjects, int count)
+static ManicVec2 camera_world_point(const Mobject *mobjects, int node, ManicVec2 point)
 {
-    int width = GetScreenWidth();
-    int height = GetScreenHeight();
-    float scale = (float)height / camera->frame_height;
+    int parent = mobjects[node].parent;
 
-    ClearBackground(camera->background);
-    for(int i = 0; i < count; i++) {
+    while(parent >= 0) {
+        const Mobject *group = &mobjects[(unsigned int)parent & MANIC_SLOT_MASK];
+        float cosine = cosf(group->group_rotation);
+        float sine = sinf(group->group_rotation);
+        float x = point.x * group->group_scale;
+        float y = point.y * group->group_scale;
+
+        point.x = group->position.x + x * cosine - y * sine;
+        point.y = group->position.y + x * sine + y * cosine;
+        parent = group->parent;
+    }
+    return(point);
+}
+
+#include "../renderer/tessellation.c"
+#include "../renderer/path.c"
+
+typedef struct {
+    int index;
+    int layer;
+    unsigned long long order;
+} RenderEntry;
+
+static int render_entry_compare(const void *left, const void *right)
+{
+    const RenderEntry *a = left;
+    const RenderEntry *b = right;
+
+    if(a->layer != b->layer) {return(a->layer < b->layer ? -1 : 1);}
+    return(a->order < b->order ? -1 : a->order > b->order);
+}
+
+static int camera_capture(const ManicCamera *camera, const Mobject *mobjects, int count,
+    int width, int height, float pixel_scale)
+{
+    RenderEntry *order = NULL;
+
+    if(count > 0) {
+        if((size_t)count > SIZE_MAX / sizeof(*order)) {return(0);}
+        order = malloc((size_t)count * sizeof(*order));
+        if(order == NULL) {return(0);}
+        for(int i = 0; i < count; i++) {order[i] = (RenderEntry){i, mobjects[i].layer, mobjects[i].order};}
+        qsort(order, (size_t)count, sizeof(*order), render_entry_compare);
+    }
+    ClearBackground(raylib_color(camera->background));
+    for(int entry = 0; entry < count; entry++) {
+        int i = order[entry].index;
         const Mobject *mobject = &mobjects[i];
-        Vector2 start = camera_to_screen(camera, mobject->position, width, height);
+        Bezier segments[5] = {0};
+        VectorPath path = {.segments = segments, .capacity = 5};
+        Mobject shape = *mobject;
+        int valid = 1;
+        int ancestor = mobject->parent;
 
-        if(mobject->type == MOBJECT_CIRCLE) {
-            DrawRing(start, mobject->radius * scale - mobject->stroke_width / 2.0f,
-                mobject->radius * scale + mobject->stroke_width / 2.0f,
-                0.0f, 360.0f, 96, mobject->color);
-        }
-        else if(mobject->type == MOBJECT_RECTANGLE) {
-            Rectangle rectangle = {
-                start.x - mobject->size.x * scale / 2.0f,
-                start.y - mobject->size.y * scale / 2.0f,
-                mobject->size.x * scale,
-                mobject->size.y * scale
-            };
+        if(!mobject->active || mobject->type == MOBJECT_GROUP) {continue;}
+        while(ancestor >= 0) {
+            unsigned int parent_slot = (unsigned int)ancestor & MANIC_SLOT_MASK;
+            unsigned int generation = (unsigned int)ancestor >> MANIC_SLOT_BITS;
 
-            DrawRectangleLinesEx(rectangle, mobject->stroke_width, mobject->color);
+            if(parent_slot >= (unsigned int)count || mobjects[parent_slot].generation != generation ||
+                !mobjects[parent_slot].active || mobjects[parent_slot].reusable) {break;}
+            ancestor = mobjects[parent_slot].parent;
         }
+        if(ancestor >= 0) {continue;}
+        if(mobject->type == MOBJECT_CIRCLE) {valid = path_circle(&path, mobject->radius);}
+        else if(mobject->type == MOBJECT_RECTANGLE) {valid = path_rectangle(&path, mobject->size.x, mobject->size.y);}
         else if(mobject->type == MOBJECT_LINE) {
-            Vector2 end = camera_to_screen(camera, mobject->end, width, height);
-
-            DrawLineEx(start, end, mobject->stroke_width, mobject->color);
+            valid = path_move_to(&path, (ManicVec2){0, 0}) &&
+                path_line_to(&path, (ManicVec2){mobject->end.x - mobject->position.x,
+                    mobject->end.y - mobject->position.y});
+        }
+        else if(mobject->type != MOBJECT_PATH) {continue;}
+        if(!valid) {continue;}
+        if(mobject->type != MOBJECT_PATH) {
+            shape.path = &path;
+            shape.path_scale = 1.0f;
+            shape.fill_color.a = 0;
+        }
+        if(!camera_render_path(camera, mobjects, i, &shape, width, height, pixel_scale)) {
+            free(order);
+            return(0);
         }
     }
+    free(order);
+    return(1);
+}
+
+static int scene_render(const Scene *scene, int width, int height, float pixel_scale)
+{
+    return(camera_capture(&scene->camera, scene->mobjects, scene->mobject_count, width, height, pixel_scale));
 }

@@ -7,6 +7,7 @@
 
 - [YOU ARE HERE](#table-of-contents)
 - [What is Where](#file-tree)
+- [Dependencies](#dependencies)
 - [Compile?](#compiling-and-shit)
 - [MIT](#license)
 
@@ -37,6 +38,16 @@ MANIC/
 └── NOTES.md                
 ```
 
+
+## Dependencies
+
+- A C99 compiler, `make`, and `pkg-config` (or a compatible `pkgconf` command).
+- raylib and its development files, discoverable as `raylib` by `pkg-config`.
+- OpenGL and GLU development files, with GLU discoverable as `glu` by `pkg-config`.
+- The C math library, linked with `-lm`.
+
+Preview and PNG export need a working graphics context. Video export additionally
+requires `ffmpeg` with the `libx264` encoder; PNG export does not require FFmpeg.
 
 ## Compiling and Shit
 

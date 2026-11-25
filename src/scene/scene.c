@@ -1,104 +1,191 @@
 #include <stddef.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <limits.h>
+#include <math.h>
+
+Mobject *scene_get(Scene *scene, int handle)
+{
+    int slot = scene_slot(scene, handle);
+
+    if(slot < 0 || scene->mobjects[slot].removed) {return(NULL);}
+    return(&scene->mobjects[slot]);
+}
+
 static int scene_add(Scene *scene, Mobject mobject)
 {
-    if(scene->mobject_count >= SCENE_MAX_MOBJECTS) {return(-1);}
-    scene->mobjects[scene->mobject_count] = mobject;
-    return(scene->mobject_count++);
+    int slot = -1;
+    unsigned int generation = 0;
+
+    if(scene->next_order == ULLONG_MAX) {return(-1);}
+    for(int i = 0; i < scene->mobject_count; i++) {
+        if(scene->mobjects[i].reusable && scene->mobjects[i].generation < MANIC_MAX_GENERATION) {
+            slot = i;
+            generation = scene->mobjects[i].generation + 1;
+            break;
+        }
+    }
+    if(slot < 0) {
+        if((unsigned int)scene->mobject_count > MANIC_SLOT_MASK) {return(-1);}
+        if(scene->mobject_count == scene->mobject_capacity) {
+            int capacity = scene->mobject_capacity ? scene->mobject_capacity * 2 : 16;
+            Mobject *mobjects;
+
+            if(capacity < scene->mobject_capacity || (unsigned int)capacity > MANIC_SLOT_MASK + 1u) {
+                capacity = (int)(MANIC_SLOT_MASK + 1u);
+            }
+            if((size_t)capacity > SIZE_MAX / sizeof(*mobjects)) {return(-1);}
+            mobjects = realloc(scene->mobjects, (size_t)capacity * sizeof(*mobjects));
+            if(mobjects == NULL) {return(-1);}
+            scene->mobjects = mobjects;
+            scene->mobject_capacity = capacity;
+        }
+        slot = scene->mobject_count;
+    }
+    if(mobject.type == MOBJECT_PATH) {
+        VectorPath *copy;
+
+        if(mobject.path == NULL) {return(-1);}
+        copy = malloc(sizeof(*copy));
+        if(copy == NULL) {return(-1);}
+        if(!path_clone(copy, mobject.path)) {free(copy); return(-1);}
+        mobject.path = copy;
+    }
+    mobject.parent = -1;
+    mobject.active = 1;
+    mobject.removed = 0;
+    mobject.reusable = 0;
+    mobject.generation = generation;
+    mobject.order = scene->next_order;
+    if(scene->timeline.initialized) {
+        if(slot == scene->mobject_count) {
+            Mobject *initial;
+            size_t count = (size_t)scene->mobject_count + 1;
+
+            if(count > SIZE_MAX / sizeof(*initial) ||
+                (initial = realloc(scene->timeline.initial_mobjects, count * sizeof(*initial))) == NULL) {
+                if(mobject.type == MOBJECT_PATH) {path_destroy(mobject.path); free(mobject.path);}
+                return(-1);
+            }
+            scene->timeline.initial_mobjects = initial;
+            scene->timeline.initial_count = (int)count;
+        }
+        scene->timeline.initial_mobjects[slot] = mobject;
+    }
+    scene->mobjects[slot] = mobject;
+    if(slot == scene->mobject_count) {scene->mobject_count++;}
+    scene->next_order++;
+    return((int)((generation << MANIC_SLOT_BITS) | (unsigned int)slot));
 }
 
-int scene_play_many(Scene *scene, const Animation *animations, int count)
+int scene_set_parent(Scene *scene, int child, int parent)
 {
-    SceneAction action = {0};
+    int child_slot = scene_slot(scene, child);
+    int parent_slot = parent < 0 ? -1 : scene_slot(scene, parent);
+    int ancestor = parent;
 
-    if(scene->action_count >= SCENE_MAX_ACTIONS || count <= 0 ||
-        count > SCENE_MAX_PARALLEL_ANIMATIONS || animations == NULL) {return(0);}
-    action.type = ACTION_PLAY;
-    for(int i = 0; i < count; i++) {
-        Animation animation = animations[i];
+    if(child_slot < 0 || scene->mobjects[child_slot].removed || parent < -1 ||
+        (parent >= 0 && (parent_slot < 0 || scene->mobjects[parent_slot].removed ||
+            scene->mobjects[parent_slot].type != MOBJECT_GROUP))) {return(0);}
+    while(ancestor >= 0) {
+        int slot = scene_slot(scene, ancestor);
 
-        if(animation.mobject_index < 0 || animation.mobject_index >= scene->mobject_count ||
-            !isfinite(animation.duration) || animation.duration < 0.0f ||
-            animation.type < ANIMATION_MOVE || animation.type > ANIMATION_COLOR ||
-            animation.easing < EASING_SMOOTH || animation.easing > EASING_EASE_OUT ||
-            (animation.type == ANIMATION_SCALE &&
-                (!isfinite(animation.scale_factor) || animation.scale_factor < 0.0f)) ||
-            (animation.type == ANIMATION_MOVE &&
-                (!isfinite(animation.target_position.x) || !isfinite(animation.target_position.y)))) {
-            return(0);
-        }
-        for(int j = 0; j < i; j++) {
-            Animation previous = animations[j];
-
-            if(previous.mobject_index == animation.mobject_index &&
-                (previous.type == animation.type ||
-                    (scene->mobjects[animation.mobject_index].type == MOBJECT_LINE &&
-                        ((previous.type == ANIMATION_MOVE && animation.type == ANIMATION_SCALE) ||
-                         (previous.type == ANIMATION_SCALE && animation.type == ANIMATION_MOVE))))) {
-                return(0);
-            }
-        }
-        action.animations[i] = animation;
-        if(animation.duration > action.duration) {action.duration = animation.duration;}
+        if(slot < 0 || ancestor == child) {return(0);}
+        ancestor = scene->mobjects[slot].parent;
     }
-    action.animation_count = count;
-    scene->actions[scene->action_count++] = action;
+    scene->mobjects[child_slot].parent = parent;
     return(1);
 }
 
-static int scene_play(Scene *scene, Animation animation)
+int scene_remove(Scene *scene, int node)
 {
-    return(scene_play_many(scene, &animation, 1));
-}
+    int slot = scene_slot(scene, node);
 
-static int scene_wait(Scene *scene, float duration)
-{
-    SceneAction action = {0};
+    if(slot < 0 || scene->mobjects[slot].removed) {return(0);}
+    for(int i = 0; i < scene->mobject_count; i++) {
+        int ancestor = (int)((scene->mobjects[i].generation << MANIC_SLOT_BITS) | (unsigned int)i);
 
-    if(scene->action_count >= SCENE_MAX_ACTIONS || !isfinite(duration) || duration < 0.0f) {return(0);}
-    action.type = ACTION_WAIT;
-    action.duration = duration;
-    scene->actions[scene->action_count++] = action;
+        while(ancestor >= 0 && ancestor != node) {
+            int parent_slot = scene_slot(scene, ancestor);
+
+            if(parent_slot < 0) {break;}
+            ancestor = scene->mobjects[parent_slot].parent;
+        }
+        if(ancestor == node) {scene->mobjects[i].active = 0; scene->mobjects[i].removed = 1;}
+    }
     return(1);
 }
 
-static void scene_update(Scene *scene, float dt)
+int scene_set_layer(Scene *scene, int node, int layer)
 {
-    if(!isfinite(dt) || dt < 0.0f) {return;}
+    int slot = scene_slot(scene, node);
 
-    while(scene->current_action < scene->action_count) {
-        SceneAction *action = &scene->actions[scene->current_action];
-        float remaining;
-        float advance;
-
-        if(!scene->action_started) {
-            for(int i = 0; i < action->animation_count; i++) {
-                scene->starting_mobjects[i] = scene->mobjects[action->animations[i].mobject_index];
-            }
-            scene->action_started = 1;
-        }
-        remaining = action->duration - scene->action_elapsed;
-        advance = dt < remaining ? dt : remaining;
-        scene->action_elapsed += advance;
-        dt -= advance;
-
-        for(int i = 0; i < action->animation_count; i++) {
-            Animation *animation = &action->animations[i];
-            float alpha = animation->duration > 0.0f ?
-                scene->action_elapsed / animation->duration : 1.0f;
-
-            animation_interpolate(animation, &scene->starting_mobjects[i],
-                &scene->mobjects[animation->mobject_index], alpha);
-        }
-        if(scene->action_elapsed < action->duration) {break;}
-        scene->current_action++;
-        scene->action_elapsed = 0.0f;
-        scene->action_started = 0;
-    }
+    if(slot < 0 || scene->mobjects[slot].removed) {return(0);}
+    scene->mobjects[slot].layer = layer;
+    return(1);
 }
 
-static void scene_render(const Scene *scene)
+int scene_collect_removed(Scene *scene)
 {
-    BeginDrawing();
-    camera_capture(&scene->camera, scene->mobjects, scene->mobject_count);
-    EndDrawing();
+    int collected = 0;
+
+    for(int node = 0; node < scene->mobject_count; node++) {
+        VectorPath *path = scene->mobjects[node].path;
+        int referenced = 0;
+
+        if(!scene->mobjects[node].removed || scene->mobjects[node].reusable ||
+            scene->mobjects[node].generation >= MANIC_MAX_GENERATION) {continue;}
+        for(int i = 0; i < scene->mobject_count && !referenced; i++) {
+            if(path != NULL && !scene->mobjects[i].removed && (scene->mobjects[i].morph_source == path ||
+                scene->mobjects[i].morph_target == path)) {referenced = 1;}
+            if(path != NULL && scene->timeline.initialized && !scene->mobjects[i].removed &&
+                (scene->timeline.initial_mobjects[i].morph_source == path ||
+                 scene->timeline.initial_mobjects[i].morph_target == path)) {referenced = 1;}
+        }
+        for(int i = 0; i < scene->timeline.action_count && !referenced; i++) {
+            SceneAction *action = &scene->timeline.actions[i];
+
+            for(int j = 0; j < action->animation_count; j++) {
+                Animation *animation = &action->animations[j];
+
+                int source = scene_slot(scene, animation->mobject_index);
+                int target = scene_slot(scene, animation->target_mobject_index);
+
+                if(path != NULL && animation->type == ANIMATION_MORPH && target == node &&
+                    source >= 0 && !scene->mobjects[source].removed) {referenced = 1; break;}
+                if(path != NULL && action->animation_started[j] && source >= 0 && !scene->mobjects[source].removed &&
+                    (action->starting_mobjects[j].morph_source == path ||
+                     action->starting_mobjects[j].morph_target == path)) {referenced = 1; break;}
+            }
+        }
+        if(referenced) {continue;}
+        if(path != NULL) {path_destroy(path); free(path);}
+        scene->mobjects[node].path = NULL;
+        scene->mobjects[node].reusable = 1;
+        if(scene->timeline.initialized) {
+            scene->timeline.initial_mobjects[node].path = NULL;
+            scene->timeline.initial_mobjects[node].reusable = 1;
+        }
+        collected++;
+    }
+    return(collected);
+}
+
+static void scene_destroy(Scene *scene)
+{
+    for(int i = 0; i < scene->timeline.action_count; i++) {
+        free(scene->timeline.actions[i].animations);
+        free(scene->timeline.actions[i].starting_mobjects);
+        free(scene->timeline.actions[i].animation_started);
+    }
+    free(scene->timeline.actions);
+    free(scene->timeline.initial_mobjects);
+    for(int i = 0; i < scene->mobject_count; i++) {
+        if(scene->mobjects[i].type == MOBJECT_PATH && scene->mobjects[i].path != NULL) {
+            path_destroy(scene->mobjects[i].path);
+            free(scene->mobjects[i].path);
+        }
+    }
+    free(scene->mobjects);
+    *scene = (Scene){0};
 }
