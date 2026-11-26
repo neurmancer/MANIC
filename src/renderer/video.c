@@ -18,16 +18,17 @@ int video_output_available(const char *path)
 
 int encode_video(const RenderConfig *config)
 {
-    size_t directory_length = strlen(config->frames_directory);
-    size_t video_length = strlen(config->video_path);
+    size_t directory_length;
+    size_t video_length;
     size_t input_size;
     char *input = NULL;
     char *temporary = NULL;
     char *output = NULL;
+    char *frame_path = NULL;
     char fps[32];
     char filter[160];
     const char *pixel_format;
-    unsigned long long intervals = config->video_intervals;
+    unsigned long long intervals;
     size_t position = 0;
     int fd = -1;
     int temporary_created = 0;
@@ -35,12 +36,28 @@ int encode_video(const RenderConfig *config)
     int status;
     int result = 1;
 
-    if(directory_length > (SIZE_MAX - 32) / 2 || video_length > SIZE_MAX - 32) {return(1);}
+    if(config == NULL || config->frames_directory == NULL || config->video_path == NULL ||
+        config->fps <= 0 || config->width <= 0 || config->height <= 0 ||
+        config->video_intervals > 10000000ULL) {return(1);}
+    directory_length = strlen(config->frames_directory);
+    video_length = strlen(config->video_path);
+    intervals = config->video_intervals;
+    if(directory_length > (SIZE_MAX - 64) / 2 || video_length > SIZE_MAX - 32) {return(1);}
     input_size = directory_length * 2 + 32;
     input = malloc(input_size);
     temporary = calloc(video_length + 16, 1);
     output = malloc(video_length + 22);
-    if(input == NULL || temporary == NULL || output == NULL) {goto cleanup;}
+    frame_path = malloc(directory_length + 64);
+    if(input == NULL || temporary == NULL || output == NULL || frame_path == NULL) {goto cleanup;}
+    for(unsigned long long frame = 0; frame <= intervals; frame++) {
+        struct stat info;
+
+        snprintf(frame_path, directory_length + 64, "%s/frame_%06llu.png", config->frames_directory, frame);
+        if(stat(frame_path, &info) != 0 || !S_ISREG(info.st_mode)) {
+            fprintf(stderr, "Missing or invalid frame: %s\n", frame_path);
+            goto cleanup;
+        }
+    }
     if(!video_output_available(config->video_path)) {goto cleanup;}
     memcpy(input, "file:", 5);
     position = 5;
@@ -63,7 +80,7 @@ int encode_video(const RenderConfig *config)
     pid = fork();
     if(pid < 0) {perror("fork"); goto cleanup;}
     if(pid == 0) {
-        execlp("ffmpeg", "ffmpeg", "-nostdin", "-y", "-framerate", fps, "-start_number", "0",
+        execlp("ffmpeg", "ffmpeg", "-nostdin", "-xerror", "-y", "-framerate", fps, "-start_number", "0",
             "-i", input, "-c:v", "libx264", "-pix_fmt", pixel_format,
             "-vf", filter, "-movflags", "+faststart", "-f", "mp4", output, (char *)NULL);
         perror("ffmpeg");
@@ -85,5 +102,6 @@ cleanup:
     free(input);
     free(temporary);
     free(output);
+    free(frame_path);
     return(result);
 }

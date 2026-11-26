@@ -144,7 +144,7 @@ int timeline_play_many(Timeline *timeline, const Scene *scene, const Animation *
         if(animations[i].type == ANIMATION_FOLLOW_CURVE) {
             Bezier curve = {.degree = animations[i].curve_degree};
             memcpy(curve.points, animations[i].curve_points, sizeof(curve.points));
-            action.caches[i].arc_lengths = malloc(129 * sizeof(double));
+            action.caches[i].arc_lengths = malloc(sizeof(*action.caches[i].arc_lengths));
             if(!action.caches[i].arc_lengths || !bezier_arc_table(&curve, action.caches[i].arc_lengths)) {
                 for(int j = 0; j <= i; j++) {free(action.caches[j].arc_lengths);}
                 free(action.caches);

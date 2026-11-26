@@ -354,11 +354,79 @@ static int path_describe_subpaths(const VectorPath *path, MorphSubpath **result,
     return(1);
 }
 
-static double morph_subpath_cost(const MorphSubpath *a, const MorphSubpath *b)
+static Bezier morph_segment(const VectorPath *path, const MorphSubpath *subpath,
+    size_t index, size_t offset, int reverse)
 {
-    if(a->closed != b->closed) {return(1e100);}
-    return(hypot(a->center_x - b->center_x, a->center_y - b->center_y) +
-        0.5 * hypot(a->width - b->width, a->height - b->height));
+    size_t count = subpath->end - subpath->start;
+    size_t segment = reverse ? (offset + count - 1 - index) % count : (offset + index) % count;
+    Bezier curve = path->segments[subpath->start + segment];
+
+    if(reverse) {
+        for(int i = 0; i <= curve.degree / 2; i++) {
+            ManicVec2 point = curve.points[i];
+
+            curve.points[i] = curve.points[curve.degree - i];
+            curve.points[curve.degree - i] = point;
+        }
+    }
+    return(curve);
+}
+
+static double morph_alignment(const VectorPath *a, const MorphSubpath *left,
+    const VectorPath *b, const MorphSubpath *right, size_t offset, int reverse)
+{
+    size_t na = left->end - left->start;
+    size_t nb = right->end - right->start;
+    double cost = 0;
+
+    for(int i = 0; i < 24; i++) {
+        double t = (i + 0.5) / 24.0;
+        size_t ia = (size_t)(t * na);
+        size_t ib = (size_t)(t * nb);
+        Bezier ca = morph_segment(a, left, ia, 0, 0);
+        Bezier cb = morph_segment(b, right, ib, offset, reverse);
+        ManicVec2 pa, pb;
+        double dx, dy;
+
+        if(!bezier_evaluate(&ca, t * na - ia, &pa) ||
+            !bezier_evaluate(&cb, t * nb - ib, &pb)) {return(1e100);}
+        dx = (double)pa.x - pb.x;
+        dy = (double)pa.y - pb.y;
+        cost += dx * dx + dy * dy;
+    }
+    return(sqrt(cost / 24));
+}
+
+static double morph_best_alignment(const VectorPath *a, const MorphSubpath *left,
+    const VectorPath *b, const MorphSubpath *right, int allow_reverse, size_t *offset, int *reverse)
+{
+    size_t count = right->end - right->start;
+    size_t choices = right->closed ? count : 1;
+    double best = 1e100;
+
+    *offset = 0;
+    *reverse = 0;
+    for(int direction = 0; direction <= allow_reverse; direction++) {
+        for(size_t i = 0; i < choices && i < 256; i++) {
+            size_t candidate = choices > 256 ? i * (choices / 256) + i * (choices % 256) / 256 : i;
+            size_t start = right->closed ? candidate : (direction ? count : 0);
+            double cost = morph_alignment(a, left, b, right, start, direction);
+
+            if(cost < best) {best = cost; *offset = start; *reverse = direction;}
+        }
+    }
+    return(best);
+}
+
+static double morph_subpath_cost(const VectorPath *a, const MorphSubpath *left,
+    const VectorPath *b, const MorphSubpath *right, int allow_reverse)
+{
+    size_t offset;
+    int reverse;
+
+    if(left->closed != right->closed) {return(1e100);}
+    return(morph_best_alignment(a, left, b, right, allow_reverse, &offset, &reverse) +
+        0.5 * hypot(left->width - right->width, left->height - right->height));
 }
 
 static int path_match_subpaths(const VectorPath *a, const VectorPath *b,
@@ -387,6 +455,9 @@ static int path_match_subpaths(const VectorPath *a, const VectorPath *b,
     minimum = malloc((n + 1) * sizeof(*minimum));
     used = malloc(n + 1);
     if(assignment == NULL || p == NULL || way == NULL || u == NULL || v == NULL || minimum == NULL || used == NULL) {goto cleanup;}
+    size_t closed_count = 0;
+
+    for(size_t i = 0; i < n; i++) {if(left[i].closed) {closed_count++;}}
     for(size_t row = 1; row <= n; row++) {
         size_t column = 0;
 
@@ -400,7 +471,8 @@ static int path_match_subpaths(const VectorPath *a, const VectorPath *b,
             used[column] = 1;
             for(size_t j = 1; j <= n; j++) {
                 if(!used[j]) {
-                    double cost = morph_subpath_cost(&left[current - 1], &right[j - 1]) - u[current] - v[j];
+                    double cost = morph_subpath_cost(a, &left[current - 1], b, &right[j - 1],
+                        !left[current - 1].closed || closed_count == 1) - u[current] - v[j];
 
                     if(cost < minimum[j]) {minimum[j] = cost; way[j] = column;}
                     if(minimum[j] < delta) {delta = minimum[j]; next = j;}
@@ -477,6 +549,9 @@ static int bezier_interval(const Bezier *curve, double begin, double end, Bezier
 static int path_interpolate_matched(const VectorPath *a, const VectorPath *b, float alpha,
     VectorPath *output, MorphSubpath *source, MorphSubpath *target, size_t *matching, size_t count)
 {
+    size_t closed_count = 0;
+
+    for(size_t i = 0; i < count; i++) {if(source[i].closed) {closed_count++;}}
     for(size_t subpath = 0; subpath < count; subpath++) {
         MorphSubpath *left = &source[subpath];
         MorphSubpath *right = &target[matching[subpath]];
@@ -485,9 +560,14 @@ static int path_interpolate_matched(const VectorPath *a, const VectorPath *b, fl
         double t = 0.0;
         size_t na = left->end - left->start;
         size_t nb = right->end - right->start;
+        size_t offset;
+        int reverse;
+        Bezier first;
 
+        morph_best_alignment(a, left, b, right, !left->closed || closed_count == 1, &offset, &reverse);
+        first = morph_segment(b, right, 0, offset, reverse);
         if(!path_move_to(output, vector_lerp(a->segments[left->start].points[0],
-            b->segments[right->start].points[0], alpha))) {return(0);}
+            first.points[0], alpha))) {return(0);}
         while(sa < na && sb < nb) {
             double nexta = (double)(sa + 1) / na;
             double nextb = (double)(sb + 1) / nb;
@@ -496,8 +576,10 @@ static int path_interpolate_matched(const VectorPath *a, const VectorPath *b, fl
             Bezier cb;
             ManicVec2 points[4];
 
+            Bezier segment = morph_segment(b, right, sb, offset, reverse);
+
             if(!bezier_interval(&a->segments[left->start + sa], t * na - sa, next * na - sa, &ca) ||
-                !bezier_interval(&b->segments[right->start + sb], t * nb - sb, next * nb - sb, &cb)) {return(0);}
+                !bezier_interval(&segment, t * nb - sb, next * nb - sb, &cb)) {return(0);}
             for(int j = 0; j < 4; j++) {points[j] = vector_lerp(ca.points[j], cb.points[j], alpha);}
             if(!path_cubic_to(output, points[1], points[2], points[3])) {return(0);}
             t = next;
@@ -563,43 +645,87 @@ int path_interpolate_cached(const MorphCache *cache, float alpha, VectorPath *ou
     return(1);
 }
 
-int bezier_arc_table(const Bezier *curve, double lengths[129])
+static double bezier_speed(const Bezier *curve, double t)
 {
-    ManicVec2 previous, point;
+    double x[3], y[3];
+    int degree = curve->degree;
 
-    lengths[0] = 0;
-    if(!bezier_evaluate(curve, 0, &previous)) {return(0);}
+    for(int i = 0; i < degree; i++) {
+        x[i] = degree * ((double)curve->points[i + 1].x - curve->points[i].x);
+        y[i] = degree * ((double)curve->points[i + 1].y - curve->points[i].y);
+    }
+    for(int level = degree - 1; level > 0; level--) {
+        for(int i = 0; i < level; i++) {
+            x[i] += (x[i + 1] - x[i]) * t;
+            y[i] += (y[i + 1] - y[i]) * t;
+        }
+    }
+    return(hypot(x[0], y[0]));
+}
+
+static double bezier_arc_integral(const Bezier *curve, double begin, double end)
+{
+    static const double nodes[] = {0.1834346424956498, 0.5255324099163290,
+        0.7966664774136267, 0.9602898564975363};
+    static const double weights[] = {0.3626837833783620, 0.3137066458778873,
+        0.2223810344533745, 0.1012285362903763};
+    double middle = (begin + end) / 2;
+    double half = (end - begin) / 2;
+    double sum = 0;
+
+    for(int i = 0; i < 4; i++) {
+        sum += weights[i] * (bezier_speed(curve, middle - half * nodes[i]) +
+            bezier_speed(curve, middle + half * nodes[i]));
+    }
+    return(sum * half);
+}
+
+int bezier_arc_table(const Bezier *curve, ArcCache *cache)
+{
+    if(!curve || !cache || curve->degree < 1 || curve->degree > 3) {return(0);}
+    for(int i = 0; i <= curve->degree; i++) {
+        if(!vector_valid(curve->points[i])) {return(0);}
+    }
+    cache->curve = *curve;
+    cache->lengths[0] = 0;
     for(int i = 1; i <= 128; i++) {
-        if(!bezier_evaluate(curve, (double)i / 128, &point)) {return(0);}
-        lengths[i] = lengths[i - 1] + hypot((double)point.x - previous.x, (double)point.y - previous.y);
-        previous = point;
+        cache->lengths[i] = cache->lengths[i - 1] +
+            bezier_arc_integral(curve, (double)(i - 1) / 128, (double)i / 128);
     }
     return(1);
 }
 
-double bezier_arc_lookup(const double lengths[129], double fraction)
+double bezier_arc_lookup(const ArcCache *cache, double fraction)
 {
-    double wanted;
+    double wanted, begin, end, base;
     int low = 1, high = 128;
-    double span;
 
     if(fraction <= 0) {return(0);}
     if(fraction >= 1) {return(1);}
-    if(lengths[128] == 0) {return(fraction);}
-    wanted = lengths[128] * fraction;
+    if(cache->lengths[128] == 0) {return(fraction);}
+    wanted = cache->lengths[128] * fraction;
     while(low < high) {
         int mid = low + (high - low) / 2;
 
-        if(lengths[mid] < wanted) {low = mid + 1;}
+        if(cache->lengths[mid] < wanted) {low = mid + 1;}
         else {high = mid;}
     }
-    span = lengths[low] - lengths[low - 1];
-    return(((double)(low - 1) + (span > 0 ? (wanted - lengths[low - 1]) / span : 0)) / 128);
+    begin = (double)(low - 1) / 128;
+    end = (double)low / 128;
+    base = begin;
+    for(int i = 0; i < 24; i++) {
+        double middle = (begin + end) / 2;
+        double length = cache->lengths[low - 1] + bezier_arc_integral(&cache->curve, base, middle);
+
+        if(length < wanted) {begin = middle;}
+        else {end = middle;}
+    }
+    return((begin + end) / 2);
 }
 
 double bezier_arc_parameter(const Bezier *curve, double fraction)
 {
-    double lengths[129];
+    ArcCache cache;
 
-    return(bezier_arc_table(curve, lengths) ? bezier_arc_lookup(lengths, fraction) : fraction);
+    return(bezier_arc_table(curve, &cache) ? bezier_arc_lookup(&cache, fraction) : fraction);
 }

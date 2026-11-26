@@ -29,8 +29,13 @@ struct MorphCache {
     struct MorphCache *next;
 };
 
+typedef struct {
+    Bezier curve;
+    double lengths[129];
+} ArcCache;
+
 struct AnimationCache {
-    double *arc_lengths;
+    ArcCache *arc_lengths;
     MorphCache *morphs;
 };
 
@@ -48,8 +53,8 @@ typedef struct {
 
 int vector_valid(ManicVec2);
 ManicVec2 vector_lerp(ManicVec2, ManicVec2, double);
-int bezier_arc_table(const Bezier *, double [129]);
-double bezier_arc_lookup(const double [129], double);
+int bezier_arc_table(const Bezier *, ArcCache *);
+double bezier_arc_lookup(const ArcCache *, double);
 MorphCache *morph_cache_create(const VectorPath *, const VectorPath *);
 int path_interpolate_cached(const MorphCache *, float, VectorPath *);
 void animation_interpolate(const Animation *, const Mobject *, Mobject *, const Scene *, const AnimationCache *, float);
