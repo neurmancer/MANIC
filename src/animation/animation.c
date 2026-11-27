@@ -85,6 +85,18 @@ Animation animation_follow_curve(int mobject_index, Bezier curve, float duration
     return(animation);
 }
 
+Animation animation_follow_path(int mobject_index, const VectorPath *path, double tolerance, float duration)
+{
+    Animation animation = {0};
+
+    animation.type = ANIMATION_FOLLOW_PATH;
+    animation.mobject_index = mobject_index;
+    animation.motion_path = path;
+    animation.motion_tolerance = tolerance;
+    animation.duration = duration;
+    return(animation);
+}
+
 Animation animation_morph_to(int mobject_index, int target_index, float duration)
 {
     Animation animation = {0};
@@ -92,6 +104,17 @@ Animation animation_morph_to(int mobject_index, int target_index, float duration
     animation.type = ANIMATION_MORPH;
     animation.mobject_index = mobject_index;
     animation.target_mobject_index = target_index;
+    animation.duration = duration;
+    return(animation);
+}
+
+Animation animation_tracker_to(int tracker, double value, float duration)
+{
+    Animation animation = {0};
+
+    animation.type = ANIMATION_TRACKER;
+    animation.mobject_index = tracker;
+    animation.target_value = value;
     animation.duration = duration;
     return(animation);
 }
@@ -115,7 +138,10 @@ void animation_interpolate(const Animation *animation, const Mobject *start,
     Mobject *mobject, const Scene *scene, const AnimationCache *cache, float alpha)
 {
     alpha = animation_ease(animation->easing, alpha);
-    if(animation->type == ANIMATION_MOVE) {
+    if(animation->type == ANIMATION_TRACKER) {
+        mobject->tracker_value = start->tracker_value * (1.0 - alpha) + animation->target_value * alpha;
+    }
+    else if(animation->type == ANIMATION_MOVE) {
         ManicVec2 offset = {
             (animation->target_position.x - start->position.x) * alpha,
             (animation->target_position.y - start->position.y) * alpha
@@ -174,6 +200,17 @@ void animation_interpolate(const Animation *animation, const Mobject *start,
 
         for(int i = 0; i < 4; i++) {curve.points[i] = animation->curve_points[i];}
         if(bezier_evaluate(&curve, cache->arc_lengths ? bezier_arc_lookup(cache->arc_lengths, alpha) : bezier_arc_parameter(&curve, alpha), &position)) {
+            mobject->position = position;
+            if(mobject->type == MOBJECT_LINE) {
+                mobject->end.x = start->end.x + position.x - start->position.x;
+                mobject->end.y = start->end.y + position.y - start->position.y;
+            }
+        }
+    }
+    else if(animation->type == ANIMATION_FOLLOW_PATH) {
+        ManicVec2 position;
+
+        if(path_arc_point(cache->path_arc, alpha, &position)) {
             mobject->position = position;
             if(mobject->type == MOBJECT_LINE) {
                 mobject->end.x = start->end.x + position.x - start->position.x;

@@ -23,13 +23,15 @@ typedef struct VectorPath VectorPath;
 typedef struct MorphCache MorphCache;
 typedef struct AnimationCache AnimationCache;
 typedef struct TimelineCheckpoint TimelineCheckpoint;
+typedef struct SceneUpdater SceneUpdater;
 
 typedef enum {
     MOBJECT_CIRCLE,
     MOBJECT_LINE,
     MOBJECT_RECTANGLE,
     MOBJECT_GROUP,
-    MOBJECT_PATH
+    MOBJECT_PATH,
+    MOBJECT_TRACKER
 } MobjectType;
 
 typedef enum {
@@ -79,6 +81,7 @@ typedef struct {
     const VectorPath *morph_target;
     float morph_alpha;
     const MorphCache *morph_cache;
+    double tracker_value;
 } Mobject;
 
 typedef enum {
@@ -89,7 +92,9 @@ typedef enum {
     ANIMATION_ROTATE,
     ANIMATION_REVEAL,
     ANIMATION_FOLLOW_CURVE,
-    ANIMATION_MORPH
+    ANIMATION_MORPH,
+    ANIMATION_FOLLOW_PATH,
+    ANIMATION_TRACKER
 } AnimationType;
 
 typedef enum {
@@ -114,13 +119,18 @@ typedef struct {
     int target_mobject_index;
     float duration;
     float offset;
+    const VectorPath *motion_path;
+    double motion_tolerance;
+    double target_value;
 } Animation;
 
 typedef enum {
     ACTION_PLAY,
     ACTION_WAIT,
     ACTION_SHOW,
-    ACTION_HIDE
+    ACTION_HIDE,
+    ACTION_PARENT,
+    ACTION_LAYER
 } ActionType;
 
 typedef struct {
@@ -132,6 +142,8 @@ typedef struct {
     int animation_count;
     float duration;
     int node;
+    int parent;
+    int layer;
 } SceneAction;
 
 typedef struct {
@@ -163,7 +175,12 @@ typedef struct {
     ManicCamera camera;
     Timeline timeline;
     unsigned long long next_order;
+    SceneUpdater *updaters;
+    int updater_count;
+    int updater_capacity;
 } Scene;
+
+typedef int (*ScenePositionUpdater)(double, double, const void *, ManicVec2 *);
 
 
 typedef struct {
@@ -201,6 +218,34 @@ typedef struct {
 } MathAxes;
 
 typedef double (*MathFunction)(double x, void *context);
+typedef int (*MathParametric)(double t, void *context, double *x, double *y);
+
+typedef struct {
+    int enabled;
+    double x_min;
+    double x_max;
+    double y_min;
+    double y_max;
+} GraphClip;
+
+typedef enum {
+    NUMBER_GENERAL,
+    NUMBER_FIXED,
+    NUMBER_SCIENTIFIC
+} NumberNotation;
+
+typedef enum {
+    NUMBER_ALIGN_LEFT,
+    NUMBER_ALIGN_CENTER,
+    NUMBER_ALIGN_RIGHT
+} NumberAlignment;
+
+typedef struct {
+    NumberNotation notation;
+    NumberAlignment alignment;
+    int precision;
+    int show_plus;
+} NumberFormat;
 
 
 typedef struct {
@@ -252,10 +297,20 @@ Animation animation_with_easing(Animation, Easing);
 Animation animation_rotate_to(int, float, float);
 Animation animation_reveal_to(int, float, float);
 Animation animation_follow_curve(int, Bezier, float);
+Animation animation_follow_path(int, const VectorPath *, double, float);
 Animation animation_morph_to(int, int, float);
+Animation animation_tracker_to(int, double, float);
 Animation animation_with_offset(Animation, float);
 Mobject *scene_get(Scene *, int);
+int scene_read(const Scene *, int, Mobject *);
 int scene_add(Scene *, Mobject);
+int scene_add_child(Scene *, int, Mobject);
+int scene_group(Scene *, ManicVec2, const int *, int);
+int scene_tracker(Scene *, double);
+int scene_tracker_value(const Scene *, int, double *);
+int scene_tracker_set(Scene *, int, double);
+int scene_bind_position(Scene *, int, int, ScenePositionUpdater, const void *);
+int scene_unbind_position(Scene *, int);
 int scene_set_parent(Scene *, int, int);
 int scene_remove(Scene *, int);
 int scene_set_layer(Scene *, int, int);
@@ -268,7 +323,11 @@ int timeline_seek(Timeline *, Scene *, double);
 int scene_schedule_add(Scene *, int);
 int scene_schedule_remove(Scene *, int);
 int scene_schedule_show(Scene *, int);
+int scene_schedule_parent(Scene *, int, int);
+int scene_schedule_layer(Scene *, int, int);
 int scene_play_many(Scene *, const Animation *, int);
+int scene_play_staggered(Scene *, const Animation *, int, float);
+int scene_play_sequence(Scene *, const Animation *, int);
 int scene_play(Scene *, Animation);
 int scene_wait(Scene *, float);
 int scene_update(Scene *, double);
@@ -280,12 +339,25 @@ int scene_export_frames(Scene *, const RenderConfig *);
 int video_output_available(const char *);
 int encode_video(const RenderConfig *);
 int axes_point(const MathAxes *, double, double, ManicVec2 *);
+int axes_coordinates(const MathAxes *, ManicVec2, double *, double *);
+GraphClip graph_clip_axes(const MathAxes *);
+int path_parametric_graph(VectorPath *, const MathAxes *, MathParametric, void *, double, double,
+    int, GraphSampling, GraphClip, const double *, size_t);
+int scene_parametric_graph(Scene *, const MathAxes *, MathParametric, void *, double, double,
+    int, GraphSampling, GraphClip, const double *, size_t, ManicColor);
+int scene_function_graph_config(Scene *, const MathAxes *, MathFunction, void *, int,
+    GraphSampling, GraphClip, const double *, size_t, ManicColor);
+int scene_number_plane(Scene *, MathAxes *, ManicVec2, float, float, ManicColor, ManicColor);
+int scene_dot(Scene *, ManicVec2, float, ManicColor);
+int scene_arrow(Scene *, ManicVec2, ManicVec2, float, ManicColor);
+int scene_tangent_indicator(Scene *, ManicVec2, ManicVec2, float, ManicColor);
 int scene_number_line(Scene *, ManicVec2, ManicVec2, float, float, float, float, ManicColor);
 int scene_axes(Scene *, MathAxes *, ManicVec2, float, ManicColor);
 int scene_function_graph(Scene *, const MathAxes *, MathFunction, void *, int, ManicColor);
 int scene_function_graph_adaptive(Scene *, const MathAxes *, MathFunction, void *, int, GraphSampling, ManicColor);
 int scene_function_graph_with_breaks(Scene *, const MathAxes *, MathFunction, void *, int, GraphSampling, const double *, size_t, ManicColor);
 int scene_number_label(Scene *, double, ManicVec2, float, ManicColor);
+int scene_number_label_formatted(Scene *, double, ManicVec2, float, ManicColor, NumberFormat);
 int scene_axes_labels(Scene *, const MathAxes *, float, float, ManicColor);
 int scene_number_line_labels(Scene *, int, ManicVec2, ManicVec2, float, float, float, float, float, ManicColor);
 

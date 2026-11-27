@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <limits.h>
 #include <math.h>
+#include <float.h>
 
 Mobject *scene_get(Scene *scene, int handle)
 {
@@ -11,6 +12,17 @@ Mobject *scene_get(Scene *scene, int handle)
 
     if(slot < 0 || scene->mobjects[slot].removed) {return(NULL);}
     return(&scene->mobjects[slot]);
+}
+
+int scene_read(const Scene *scene, int handle, Mobject *output)
+{
+    int slot;
+
+    if(scene == NULL || output == NULL) {return(0);}
+    slot = scene_slot(scene, handle);
+    if(slot < 0 || scene->mobjects[slot].removed) {return(0);}
+    *output = scene->mobjects[slot];
+    return(1);
 }
 
 int scene_add(Scene *scene, Mobject mobject)
@@ -80,22 +92,203 @@ int scene_add(Scene *scene, Mobject mobject)
     return((int)((generation << MANIC_SLOT_BITS) | (unsigned int)slot));
 }
 
-int scene_set_parent(Scene *scene, int child, int parent)
+int scene_parent_valid(const Scene *scene, int child, int parent)
 {
-    int child_slot = scene_slot(scene, child);
-    int parent_slot = parent < 0 ? -1 : scene_slot(scene, parent);
-    int ancestor = parent;
+    int child_slot, parent_slot, ancestor = parent;
+    int steps = 0;
 
+    if(scene == NULL) {return(0);}
+    child_slot = scene_slot(scene, child);
+    parent_slot = parent < 0 ? -1 : scene_slot(scene, parent);
     if(child_slot < 0 || scene->mobjects[child_slot].removed || parent < -1 ||
         (parent >= 0 && (parent_slot < 0 || scene->mobjects[parent_slot].removed ||
             scene->mobjects[parent_slot].type != MOBJECT_GROUP))) {return(0);}
     while(ancestor >= 0) {
         int slot = scene_slot(scene, ancestor);
 
-        if(slot < 0 || ancestor == child) {return(0);}
+        if(slot < 0 || ancestor == child || steps++ >= scene->mobject_count) {return(0);}
         ancestor = scene->mobjects[slot].parent;
     }
-    scene->mobjects[child_slot].parent = parent;
+    return(1);
+}
+
+static int scene_structure_editable(const Scene *scene)
+{
+    for(int i = 0; i < scene->timeline.current_action; i++) {
+        ActionType type = scene->timeline.actions[i].type;
+
+        if(type == ACTION_PARENT || type == ACTION_LAYER) {return(0);}
+    }
+    return(1);
+}
+
+int scene_set_parent(Scene *scene, int child, int parent)
+{
+    int slot;
+
+    if(!scene_parent_valid(scene, child, parent) || !scene_structure_editable(scene)) {return(0);}
+    slot = scene_slot(scene, child);
+    if(scene->timeline.initialized) {
+        Scene baseline = *scene;
+
+        baseline.mobjects = scene->timeline.initial_mobjects;
+        if(!scene_parent_valid(&baseline, child, parent)) {return(0);}
+        baseline.mobjects[slot].parent = parent;
+        timeline_invalidate_checkpoints(&scene->timeline);
+    }
+    scene->mobjects[slot].parent = parent;
+    return(1);
+}
+
+int scene_add_child(Scene *scene, int parent, Mobject object)
+{
+    int parent_slot, child;
+
+    if(scene == NULL || !scene_structure_editable(scene) || (parent_slot = scene_slot(scene, parent)) < 0 ||
+        scene->mobjects[parent_slot].removed || scene->mobjects[parent_slot].type != MOBJECT_GROUP) {return(-1);}
+    child = scene_add(scene, object);
+    if(child < 0) {return(-1);}
+    if(!scene_set_parent(scene, child, parent)) {scene_remove(scene, child); return(-1);}
+    return(child);
+}
+
+int scene_group(Scene *scene, ManicVec2 position, const int *children, int count)
+{
+    int group;
+
+    if(scene == NULL || !vector_valid(position) || count < 0 || (count && children == NULL) ||
+        (count && !scene_structure_editable(scene))) {return(-1);}
+    for(int i = 0; i < count; i++) {
+        int slot = scene_slot(scene, children[i]);
+
+        if(slot < 0 || scene->mobjects[slot].removed) {return(-1);}
+        for(int j = 0; j < i; j++) {if(children[j] == children[i]) {return(-1);}}
+    }
+    group = scene_add(scene, group_create(position));
+    if(group < 0) {return(-1);}
+    for(int i = 0; i < count; i++) {
+        if(!scene_set_parent(scene, children[i], group)) {return(-1);}
+    }
+    return(group);
+}
+
+int scene_tracker(Scene *scene, double value)
+{
+    Mobject tracker = {0};
+
+    if(scene == NULL || !isfinite(value)) {return(-1);}
+    tracker.type = MOBJECT_TRACKER;
+    tracker.tracker_value = value;
+    return(scene_add(scene, tracker));
+}
+
+int scene_tracker_value(const Scene *scene, int tracker, double *value)
+{
+    int slot;
+
+    if(scene == NULL || value == NULL || (slot = scene_slot(scene, tracker)) < 0 ||
+        scene->mobjects[slot].removed || scene->mobjects[slot].type != MOBJECT_TRACKER) {return(0);}
+    *value = scene->mobjects[slot].tracker_value;
+    return(1);
+}
+
+static int scene_before_playback(const Scene *scene)
+{
+    return(scene->timeline.current_action == 0 && !scene->timeline.action_started && scene->timeline.elapsed == 0);
+}
+
+int scene_tracker_set(Scene *scene, int tracker, double value)
+{
+    int slot;
+
+    if(scene == NULL || !scene_before_playback(scene) || !isfinite(value) || (slot = scene_slot(scene, tracker)) < 0 ||
+        scene->mobjects[slot].removed || scene->mobjects[slot].type != MOBJECT_TRACKER) {return(0);}
+    scene->mobjects[slot].tracker_value = value;
+    if(scene->timeline.initialized) {
+        scene->timeline.initial_mobjects[slot].tracker_value = value;
+        timeline_invalidate_checkpoints(&scene->timeline);
+    }
+    return(1);
+}
+
+int scene_bind_position(Scene *scene, int node, int tracker, ScenePositionUpdater function, const void *context)
+{
+    int target, source;
+    SceneUpdater *items;
+    int capacity;
+
+    if(scene == NULL || !scene_before_playback(scene) || function == NULL || (target = scene_slot(scene, node)) < 0 ||
+        (source = scene_slot(scene, tracker)) < 0 || scene->mobjects[target].removed ||
+        scene->mobjects[source].removed || scene->mobjects[target].type == MOBJECT_TRACKER ||
+        scene->mobjects[source].type != MOBJECT_TRACKER) {return(0);}
+    for(int i = 0; i < scene->updater_count; i++) {
+        if(scene->updaters[i].node == node) {return(0);}
+    }
+    for(int i = 0; i < scene->timeline.action_count; i++) {
+        const SceneAction *action = &scene->timeline.actions[i];
+
+        for(int j = 0; j < action->animation_count; j++) {
+            const Animation *animation = &action->animations[j];
+
+            if(animation->mobject_index == node &&
+                (animation->type == ANIMATION_MOVE || animation->type == ANIMATION_FOLLOW_CURVE ||
+                 animation->type == ANIMATION_FOLLOW_PATH ||
+                 (scene->mobjects[target].type == MOBJECT_LINE && animation->type == ANIMATION_SCALE))) {return(0);}
+        }
+    }
+    if(scene->updater_count == scene->updater_capacity) {
+        if(scene->updater_capacity > INT_MAX / 2) {return(0);}
+        capacity = scene->updater_capacity ? scene->updater_capacity * 2 : 8;
+        if((size_t)capacity > SIZE_MAX / sizeof(*items)) {return(0);}
+        items = realloc(scene->updaters, (size_t)capacity * sizeof(*items));
+        if(items == NULL) {return(0);}
+        scene->updaters = items;
+        scene->updater_capacity = capacity;
+    }
+    scene->updaters[scene->updater_count++] = (SceneUpdater){node, tracker, function, context,
+        (double)scene->mobjects[target].end.x - scene->mobjects[target].position.x,
+        (double)scene->mobjects[target].end.y - scene->mobjects[target].position.y};
+    timeline_invalidate_checkpoints(&scene->timeline);
+    return(1);
+}
+
+int scene_unbind_position(Scene *scene, int node)
+{
+    if(scene == NULL || !scene_before_playback(scene)) {return(0);}
+    for(int i = 0; i < scene->updater_count; i++) {
+        if(scene->updaters[i].node == node) {
+            memmove(&scene->updaters[i], &scene->updaters[i + 1],
+                (size_t)(scene->updater_count - i - 1) * sizeof(*scene->updaters));
+            scene->updater_count--;
+            timeline_invalidate_checkpoints(&scene->timeline);
+            return(1);
+        }
+    }
+    return(0);
+}
+
+int scene_apply_updaters(Scene *scene)
+{
+    for(int i = 0; i < scene->updater_count; i++) {
+        const SceneUpdater *updater = &scene->updaters[i];
+        int node = scene_slot(scene, updater->node);
+        int tracker = scene_slot(scene, updater->tracker);
+        ManicVec2 position;
+        Mobject *object;
+
+        if(node < 0 || tracker < 0 || scene->mobjects[node].removed || scene->mobjects[tracker].removed) {continue;}
+        object = &scene->mobjects[node];
+        if(!updater->function(scene->mobjects[tracker].tracker_value, scene->timeline.elapsed,
+            updater->context, &position) || !vector_valid(position)) {return(0);}
+        if(object->type == MOBJECT_LINE) {
+            double x = (double)position.x + updater->line_dx;
+            double y = (double)position.y + updater->line_dy;
+
+            if(!isfinite(x) || !isfinite(y) || fabs(x) > FLT_MAX || fabs(y) > FLT_MAX) {return(0);}
+            object->end = (ManicVec2){(float)x, (float)y};
+        }
+        object->position = position;
+    }
     return(1);
 }
 
@@ -123,8 +316,12 @@ int scene_set_layer(Scene *scene, int node, int layer)
 {
     int slot = scene_slot(scene, node);
 
-    if(slot < 0 || scene->mobjects[slot].removed) {return(0);}
+    if(slot < 0 || scene->mobjects[slot].removed || !scene_structure_editable(scene)) {return(0);}
     scene->mobjects[slot].layer = layer;
+    if(scene->timeline.initialized) {
+        scene->timeline.initial_mobjects[slot].layer = layer;
+        timeline_invalidate_checkpoints(&scene->timeline);
+    }
     return(1);
 }
 
@@ -182,6 +379,7 @@ void scene_destroy(Scene *scene)
             AnimationCache *cache = &scene->timeline.actions[i].caches[j];
             MorphCache *item = cache->morphs;
             free(cache->arc_lengths);
+            path_arc_destroy(cache->path_arc);
             while(item) {
                 MorphCache *next = item->next;
 
@@ -206,5 +404,6 @@ void scene_destroy(Scene *scene)
         }
     }
     free(scene->mobjects);
+    free(scene->updaters);
     *scene = (Scene){0};
 }

@@ -10,7 +10,7 @@ EXAMPLE_SOURCES := $(shell find examples -name '*.c')
 LIB_OBJECTS := $(patsubst %.c,build/%.o,$(LIB_SOURCES))
 CLI_OBJECTS := $(patsubst %.c,build/%.o,src/main.c $(EXAMPLE_SOURCES))
 
-.PHONY: all clean
+.PHONY: all clean test
 all: build/manic build/libmanic.a
 
 build/manic: $(CLI_OBJECTS) build/libmanic.a
@@ -24,6 +24,9 @@ build/%.o: %.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) -MMD -MP -c $< -o $@
 
 -include $(LIB_OBJECTS:.o=.d) $(CLI_OBJECTS:.o=.d)
+
+test: all
+	sh tools/test.sh
 
 clean:
 	rm -rf build

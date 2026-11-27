@@ -69,7 +69,7 @@ int render_config_parse(RenderConfig *config, int argc, char **argv)
             config->video_path = argv[i];
         }
         else if(strcmp(option, "--scene") == 0) {
-            if(strcmp(argv[i], "first") != 0 && strcmp(argv[i], "benchmark") != 0 && strcmp(argv[i], "paths") != 0 && strcmp(argv[i], "animations") != 0 && strcmp(argv[i], "math") != 0) {return(0);}
+            if(strcmp(argv[i], "first") != 0 && strcmp(argv[i], "benchmark") != 0 && strcmp(argv[i], "paths") != 0 && strcmp(argv[i], "animations") != 0 && strcmp(argv[i], "math") != 0 && strcmp(argv[i], "plane") != 0 && strcmp(argv[i], "tracker") != 0) {return(0);}
             config->scene_name = argv[i];
         }
         else if(strcmp(option, "--supersample") == 0) {

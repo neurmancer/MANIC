@@ -10,7 +10,7 @@ int main(int argc, char **argv)
         FILE *output = parsed == 2 ? stdout : stderr;
 
         fprintf(output, "Usage: %s [--width pixels] [--height pixels] [--fps rate] "
-            "[--background RRGGBB] [--frames directory] [--scene first|benchmark|paths|animations|math] "
+            "[--background RRGGBB] [--frames directory] [--scene first|benchmark|paths|animations|math|plane|tracker] "
             "[--supersample 1|2|4] [--video output.mp4]\n", argv[0]);
         return(parsed == 2 ? 0 : 1);
     }
@@ -26,6 +26,12 @@ int main(int argc, char **argv)
     }
     else if(strcmp(config.scene_name, "math") == 0) {
         if(math_scene_build(&scene) != 0) {scene_destroy(&scene); return(1);}
+    }
+    else if(strcmp(config.scene_name, "plane") == 0) {
+        if(plane_scene_build(&scene) != 0) {scene_destroy(&scene); return(1);}
+    }
+    else if(strcmp(config.scene_name, "tracker") == 0) {
+        if(tracker_scene_build(&scene) != 0) {scene_destroy(&scene); return(1);}
     }
     else if(first_scene_build(&scene) != 0) {scene_destroy(&scene); return(1);}
     if(config.video_path != NULL && !scene_frame_intervals(&scene, config.fps, &config.video_intervals)) {

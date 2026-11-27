@@ -1,5 +1,9 @@
 #include "internal.h"
 #include <string.h>
+#include <float.h>
+
+#define MAX_CHECKPOINTS 32
+#define CHECKPOINT_BYTES (8u * 1024u * 1024u)
 
 struct TimelineCheckpoint {
     double time;
@@ -20,14 +24,30 @@ static void timeline_checkpoint(Timeline *timeline, const Scene *scene)
 {
     TimelineCheckpoint *items;
     Mobject *snapshot;
+    size_t snapshot_size = (size_t)scene->mobject_count * sizeof(*snapshot);
+    size_t limit = snapshot_size ? CHECKPOINT_BYTES / snapshot_size : MAX_CHECKPOINTS;
 
+    if(limit > MAX_CHECKPOINTS) {limit = MAX_CHECKPOINTS;}
+    if(limit == 0) {return;}
     if(timeline->checkpoint_count &&
         timeline->checkpoints[timeline->checkpoint_count - 1].action >= timeline->current_action) {return;}
+    if((size_t)timeline->checkpoint_count >= limit) {
+        int kept = 0;
+
+        for(int i = 0; i < timeline->checkpoint_count; i++) {
+            if(i % 2 == 0 && i + 1 < timeline->checkpoint_count) {
+                timeline->checkpoints[kept++] = timeline->checkpoints[i];
+            }
+            else {free(timeline->checkpoints[i].mobjects);}
+        }
+        timeline->checkpoint_count = kept;
+    }
     if(timeline->checkpoint_count == timeline->checkpoint_capacity) {
         int capacity;
 
         if(timeline->checkpoint_capacity > INT_MAX / 2) {return;}
         capacity = timeline->checkpoint_capacity ? timeline->checkpoint_capacity * 2 : 8;
+        if((size_t)capacity > limit) {capacity = (int)limit;}
         if(capacity < timeline->checkpoint_capacity || (size_t)capacity > SIZE_MAX / sizeof(*items)) {return;}
         items = realloc(timeline->checkpoints, (size_t)capacity * sizeof(*items));
         if(!items) {return;}
@@ -76,16 +96,22 @@ int timeline_play_many(Timeline *timeline, const Scene *scene, const Animation *
             !isfinite(animation.duration) || animation.duration < 0.0f ||
             !isfinite(animation.offset) || animation.offset < 0.0f ||
             !isfinite(animation.offset + animation.duration) ||
-            animation.type < ANIMATION_MOVE || animation.type > ANIMATION_MORPH ||
+            animation.type < ANIMATION_MOVE || animation.type > ANIMATION_TRACKER ||
+            ((scene->mobjects[slot].type == MOBJECT_TRACKER) != (animation.type == ANIMATION_TRACKER)) ||
+            (animation.type == ANIMATION_TRACKER && !isfinite(animation.target_value)) ||
             (scene->mobjects[slot].type == MOBJECT_GROUP &&
                 animation.type != ANIMATION_MOVE && animation.type != ANIMATION_SCALE &&
-                animation.type != ANIMATION_ROTATE && animation.type != ANIMATION_FOLLOW_CURVE) ||
+                animation.type != ANIMATION_ROTATE && animation.type != ANIMATION_FOLLOW_CURVE &&
+                animation.type != ANIMATION_FOLLOW_PATH) ||
             (animation.type == ANIMATION_ROTATE && !isfinite(animation.target_rotation)) ||
             (animation.type == ANIMATION_REVEAL &&
                 (!isfinite(animation.target_progress) || animation.target_progress < 0.0f ||
                  animation.target_progress > 1.0f)) ||
             (animation.type == ANIMATION_FOLLOW_CURVE &&
                 (animation.curve_degree < 1 || animation.curve_degree > 3)) ||
+            (animation.type == ANIMATION_FOLLOW_PATH &&
+                (animation.motion_path == NULL || !isfinite(animation.motion_tolerance) ||
+                 animation.motion_tolerance <= 0)) ||
             (animation.type == ANIMATION_MORPH &&
                 (scene->mobjects[slot].type != MOBJECT_PATH ||
                  target < 0 || !scene->mobjects[target].active ||
@@ -99,6 +125,12 @@ int timeline_play_many(Timeline *timeline, const Scene *scene, const Animation *
                 (!isfinite(animation.target_position.x) || !isfinite(animation.target_position.y)))) {
             return(0);
         }
+        for(int j = 0; j < scene->updater_count; j++) {
+            if(scene->updaters[j].node == animation.mobject_index &&
+                (animation.type == ANIMATION_MOVE || animation.type == ANIMATION_FOLLOW_CURVE ||
+                 animation.type == ANIMATION_FOLLOW_PATH ||
+                 (scene->mobjects[slot].type == MOBJECT_LINE && animation.type == ANIMATION_SCALE))) {return(0);}
+        }
         if(animation.type == ANIMATION_FOLLOW_CURVE) {
             for(int point = 0; point <= animation.curve_degree; point++) {
                 if(!vector_valid(animation.curve_points[point])) {return(0);}
@@ -106,16 +138,16 @@ int timeline_play_many(Timeline *timeline, const Scene *scene, const Animation *
         }
         for(int j = 0; j < i; j++) {
             Animation previous = animations[j];
+            int previous_motion = previous.type == ANIMATION_MOVE || previous.type == ANIMATION_FOLLOW_CURVE ||
+                previous.type == ANIMATION_FOLLOW_PATH;
+            int animation_motion = animation.type == ANIMATION_MOVE || animation.type == ANIMATION_FOLLOW_CURVE ||
+                animation.type == ANIMATION_FOLLOW_PATH;
 
             if(previous.mobject_index == animation.mobject_index &&
-                (previous.type == animation.type ||
-                    ((previous.type == ANIMATION_MOVE && animation.type == ANIMATION_FOLLOW_CURVE) ||
-                     (previous.type == ANIMATION_FOLLOW_CURVE && animation.type == ANIMATION_MOVE)) ||
+                (previous.type == animation.type || (previous_motion && animation_motion) ||
                     (scene->mobjects[slot].type == MOBJECT_LINE &&
-                        (((previous.type == ANIMATION_MOVE || previous.type == ANIMATION_FOLLOW_CURVE) &&
-                          animation.type == ANIMATION_SCALE) ||
-                         (previous.type == ANIMATION_SCALE &&
-                          (animation.type == ANIMATION_MOVE || animation.type == ANIMATION_FOLLOW_CURVE)))))) {
+                        ((previous_motion && animation.type == ANIMATION_SCALE) ||
+                         (previous.type == ANIMATION_SCALE && animation_motion))))) {
                 float previous_end = previous.offset + previous.duration;
                 float animation_end = animation.offset + animation.duration;
 
@@ -141,12 +173,30 @@ int timeline_play_many(Timeline *timeline, const Scene *scene, const Animation *
     }
     memcpy(action.animations, animations, (size_t)count * sizeof(*animations));
     for(int i = 0; i < count; i++) {
+        if(animations[i].type == ANIMATION_FOLLOW_PATH) {
+            action.caches[i].path_arc = path_arc_create(animations[i].motion_path, animations[i].motion_tolerance);
+            if(!action.caches[i].path_arc) {
+                for(int j = 0; j <= i; j++) {
+                    free(action.caches[j].arc_lengths);
+                    path_arc_destroy(action.caches[j].path_arc);
+                }
+                free(action.caches);
+                free(action.animations);
+                free(action.starting_mobjects);
+                free(action.animation_started);
+                return(0);
+            }
+            action.animations[i].motion_path = NULL;
+        }
         if(animations[i].type == ANIMATION_FOLLOW_CURVE) {
             Bezier curve = {.degree = animations[i].curve_degree};
             memcpy(curve.points, animations[i].curve_points, sizeof(curve.points));
             action.caches[i].arc_lengths = malloc(sizeof(*action.caches[i].arc_lengths));
             if(!action.caches[i].arc_lengths || !bezier_arc_table(&curve, action.caches[i].arc_lengths)) {
-                for(int j = 0; j <= i; j++) {free(action.caches[j].arc_lengths);}
+                for(int j = 0; j <= i; j++) {
+                    free(action.caches[j].arc_lengths);
+                    path_arc_destroy(action.caches[j].path_arc);
+                }
                 free(action.caches);
                 free(action.animations);
                 free(action.starting_mobjects);
@@ -205,6 +255,38 @@ int scene_schedule_show(Scene *scene, int node)
     return(timeline_visibility(scene, node, 1, 0));
 }
 
+int scene_schedule_parent(Scene *scene, int child, int parent)
+{
+    SceneAction action = {0};
+    int child_slot, parent_slot;
+
+    if(scene == NULL || (child_slot = scene_slot(scene, child)) < 0 || scene->mobjects[child_slot].removed ||
+        parent < -1 || child == parent) {return(0);}
+    parent_slot = parent < 0 ? -1 : scene_slot(scene, parent);
+    if(parent >= 0 && (parent_slot < 0 || scene->mobjects[parent_slot].removed ||
+        scene->mobjects[parent_slot].type != MOBJECT_GROUP)) {return(0);}
+    if(!timeline_reserve_action(&scene->timeline)) {return(0);}
+    action.type = ACTION_PARENT;
+    action.node = child;
+    action.parent = parent;
+    scene->timeline.actions[scene->timeline.action_count++] = action;
+    return(1);
+}
+
+int scene_schedule_layer(Scene *scene, int node, int layer)
+{
+    SceneAction action = {0};
+    int slot;
+
+    if(scene == NULL || (slot = scene_slot(scene, node)) < 0 || scene->mobjects[slot].removed ||
+        !timeline_reserve_action(&scene->timeline)) {return(0);}
+    action.type = ACTION_LAYER;
+    action.node = node;
+    action.layer = layer;
+    scene->timeline.actions[scene->timeline.action_count++] = action;
+    return(1);
+}
+
 static int timeline_apply_action(SceneAction *action, Scene *scene, double elapsed)
 {
     for(int pass = 0; pass < 2; pass++) {
@@ -245,6 +327,7 @@ static int timeline_apply_action(SceneAction *action, Scene *scene, double elaps
             }
             if(alpha >= 1.0f) {action->animation_started[i] = 2;}
         }
+        if(!scene_apply_updaters(scene)) {return(0);}
     }
     return(1);
 }
@@ -262,6 +345,7 @@ int timeline_update(Timeline *timeline, Scene *scene, double dt)
         timeline->initial_count = scene->mobject_count;
         timeline->initialized = 1;
     }
+    if(!scene_apply_updaters(scene)) {return(0);}
 
     while(timeline->current_action < timeline->action_count) {
         SceneAction *action = &timeline->actions[timeline->current_action];
@@ -275,6 +359,14 @@ int timeline_update(Timeline *timeline, Scene *scene, double dt)
                 if(slot >= 0 && !scene->mobjects[slot].removed) {
                     scene->mobjects[slot].active = action->type == ACTION_SHOW;
                 }
+            }
+            if(action->type == ACTION_PARENT && scene_parent_valid(scene, action->node, action->parent)) {
+                scene->mobjects[scene_slot(scene, action->node)].parent = action->parent;
+            }
+            if(action->type == ACTION_LAYER) {
+                int slot = scene_slot(scene, action->node);
+
+                if(slot >= 0 && !scene->mobjects[slot].removed) {scene->mobjects[slot].layer = action->layer;}
             }
             for(int i = 0; i < action->animation_count; i++) {action->animation_started[i] = 0;}
             timeline->action_started = 1;
@@ -321,13 +413,17 @@ int timeline_seek(Timeline *timeline, Scene *scene, double time)
     const Mobject *snapshot = checkpoint ? checkpoint->mobjects : timeline->initial_mobjects;
     for(int i = 0; i < scene->mobject_count; i++) {
         int removed = scene->mobjects[i].removed;
-        int parent = scene->mobjects[i].parent;
-        int layer = scene->mobjects[i].layer;
         scene->mobjects[i] = snapshot[i];
         scene->mobjects[i].removed = removed;
         if(removed) {scene->mobjects[i].active = 0;}
-        scene->mobjects[i].parent = parent;
-        scene->mobjects[i].layer = layer;
+    }
+    for(int i = 0; i < scene->mobject_count; i++) {
+        int handle = (int)((scene->mobjects[i].generation << MANIC_SLOT_BITS) | (unsigned int)i);
+        int parent = scene->mobjects[i].parent;
+
+        if(!scene->mobjects[i].removed && parent >= 0 && !scene_parent_valid(scene, handle, parent)) {
+            scene->mobjects[i].parent = -1;
+        }
     }
     timeline->current_action = checkpoint ? checkpoint->action : 0;
     timeline->elapsed = checkpoint ? checkpoint->time : 0;
@@ -339,6 +435,35 @@ int timeline_seek(Timeline *timeline, Scene *scene, double time)
 int scene_play_many(Scene *scene, const Animation *animations, int count)
 {
     return(timeline_play_many(&scene->timeline, scene, animations, count));
+}
+
+int scene_play_staggered(Scene *scene, const Animation *animations, int count, float lag_ratio)
+{
+    Animation *items;
+    double cursor = 0;
+    int result;
+
+    if(scene == NULL || animations == NULL || count <= 0 || !isfinite(lag_ratio) || lag_ratio < 0 ||
+        (size_t)count > SIZE_MAX / sizeof(*items)) {return(0);}
+    items = malloc((size_t)count * sizeof(*items));
+    if(items == NULL) {return(0);}
+    for(int i = 0; i < count; i++) {
+        double offset = cursor + animations[i].offset;
+
+        if(!isfinite(offset) || offset < 0 || offset > FLT_MAX ||
+            !isfinite(animations[i].duration) || animations[i].duration < 0) {free(items); return(0);}
+        items[i] = animations[i];
+        items[i].offset = (float)offset;
+        cursor += (double)animations[i].duration * lag_ratio;
+    }
+    result = scene_play_many(scene, items, count);
+    free(items);
+    return(result);
+}
+
+int scene_play_sequence(Scene *scene, const Animation *animations, int count)
+{
+    return(scene_play_staggered(scene, animations, count, 1));
 }
 
 int scene_play(Scene *scene, Animation animation)

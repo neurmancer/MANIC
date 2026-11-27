@@ -406,13 +406,28 @@ static double morph_best_alignment(const VectorPath *a, const MorphSubpath *left
 
     *offset = 0;
     *reverse = 0;
-    for(int direction = 0; direction <= allow_reverse; direction++) {
+    for(int direction = allow_reverse == 2 ? 1 : 0; direction <= (allow_reverse != 0); direction++) {
         for(size_t i = 0; i < choices && i < 256; i++) {
             size_t candidate = choices > 256 ? i * (choices / 256) + i * (choices % 256) / 256 : i;
             size_t start = right->closed ? candidate : (direction ? count : 0);
             double cost = morph_alignment(a, left, b, right, start, direction);
 
             if(cost < best) {best = cost; *offset = start; *reverse = direction;}
+        }
+    }
+    if(right->closed && choices > 256) {
+        size_t span = choices / 256 + (choices % 256 != 0);
+        size_t center = *offset;
+        int direction = *reverse;
+
+        for(size_t i = 1; i <= span; i++) {
+            size_t candidates[2] = {(center + i) % choices, (center + choices - i) % choices};
+
+            for(int side = 0; side < 2; side++) {
+                double cost = morph_alignment(a, left, b, right, candidates[side], direction);
+
+                if(cost < best) {best = cost; *offset = candidates[side];}
+            }
         }
     }
     return(best);
@@ -430,7 +445,7 @@ static double morph_subpath_cost(const VectorPath *a, const MorphSubpath *left,
 }
 
 static int path_match_subpaths(const VectorPath *a, const VectorPath *b,
-    MorphSubpath **source, MorphSubpath **target, size_t **matching, size_t *count)
+    MorphSubpath **source, MorphSubpath **target, size_t **matching, size_t *count, int *global_reverse)
 {
     MorphSubpath *left = NULL;
     MorphSubpath *right = NULL;
@@ -442,11 +457,14 @@ static int path_match_subpaths(const VectorPath *a, const VectorPath *b,
     double *u = NULL;
     double *v = NULL;
     double *minimum = NULL;
+    double *costs = NULL;
     unsigned char *used = NULL;
     int success = 0;
+    double best_total = 1e100;
 
     if(!path_describe_subpaths(a, &left, &n) || !path_describe_subpaths(b, &right, &m) || n != m ||
-        n == SIZE_MAX || n + 1 > SIZE_MAX / sizeof(double) || n + 1 > SIZE_MAX / sizeof(size_t)) {goto cleanup;}
+        n == SIZE_MAX || n + 1 > SIZE_MAX / sizeof(double) || n + 1 > SIZE_MAX / sizeof(size_t) ||
+        n > SIZE_MAX / n || n * n > SIZE_MAX / sizeof(*costs)) {goto cleanup;}
     assignment = malloc(n * sizeof(*assignment));
     p = calloc(n + 1, sizeof(*p));
     way = calloc(n + 1, sizeof(*way));
@@ -454,45 +472,63 @@ static int path_match_subpaths(const VectorPath *a, const VectorPath *b,
     v = calloc(n + 1, sizeof(*v));
     minimum = malloc((n + 1) * sizeof(*minimum));
     used = malloc(n + 1);
-    if(assignment == NULL || p == NULL || way == NULL || u == NULL || v == NULL || minimum == NULL || used == NULL) {goto cleanup;}
-    size_t closed_count = 0;
+    costs = malloc(n * n * sizeof(*costs));
+    if(assignment == NULL || p == NULL || way == NULL || u == NULL || v == NULL ||
+        minimum == NULL || used == NULL || costs == NULL) {goto cleanup;}
+    for(int direction = 0; direction <= (n > 1); direction++) {
+        memset(p, 0, (n + 1) * sizeof(*p));
+        memset(u, 0, (n + 1) * sizeof(*u));
+        memset(v, 0, (n + 1) * sizeof(*v));
+        for(size_t i = 0; i < n; i++) {
+            for(size_t j = 0; j < n; j++) {
+                costs[i * n + j] = morph_subpath_cost(a, &left[i], b, &right[j],
+                    n == 1 ? 1 : (direction ? 2 : 0));
+            }
+        }
+        for(size_t row = 1; row <= n; row++) {
+            size_t column = 0;
 
-    for(size_t i = 0; i < n; i++) {if(left[i].closed) {closed_count++;}}
-    for(size_t row = 1; row <= n; row++) {
-        size_t column = 0;
+            p[0] = row;
+            for(size_t j = 0; j <= n; j++) {minimum[j] = 1e100; used[j] = 0;}
+            do {
+                size_t current = p[column];
+                size_t next = 0;
+                double delta = 1e100;
 
-        p[0] = row;
-        for(size_t j = 0; j <= n; j++) {minimum[j] = 1e100; used[j] = 0;}
-        do {
-            size_t current = p[column];
-            size_t next = 0;
-            double delta = 1e100;
+                used[column] = 1;
+                for(size_t j = 1; j <= n; j++) {
+                    if(!used[j]) {
+                        double cost = costs[(current - 1) * n + j - 1] - u[current] - v[j];
 
-            used[column] = 1;
-            for(size_t j = 1; j <= n; j++) {
-                if(!used[j]) {
-                    double cost = morph_subpath_cost(a, &left[current - 1], b, &right[j - 1],
-                        !left[current - 1].closed || closed_count == 1) - u[current] - v[j];
-
-                    if(cost < minimum[j]) {minimum[j] = cost; way[j] = column;}
-                    if(minimum[j] < delta) {delta = minimum[j]; next = j;}
+                        if(cost < minimum[j]) {minimum[j] = cost; way[j] = column;}
+                        if(minimum[j] < delta) {delta = minimum[j]; next = j;}
+                    }
                 }
-            }
-            if(next == 0 || delta >= 1e99) {goto cleanup;}
-            for(size_t j = 0; j <= n; j++) {
-                if(used[j]) {u[p[j]] += delta; v[j] -= delta;}
-                else {minimum[j] -= delta;}
-            }
-            column = next;
-        } while(p[column] != 0);
-        do {
-            size_t previous = way[column];
+                if(next == 0 || delta >= 1e99) {goto cleanup;}
+                for(size_t j = 0; j <= n; j++) {
+                    if(used[j]) {u[p[j]] += delta; v[j] -= delta;}
+                    else {minimum[j] -= delta;}
+                }
+                column = next;
+            } while(p[column] != 0);
+            do {
+                size_t previous = way[column];
 
-            p[column] = p[previous];
-            column = previous;
-        } while(column != 0);
+                p[column] = p[previous];
+                column = previous;
+            } while(column != 0);
+        }
+        {
+            double total = 0;
+
+            for(size_t j = 1; j <= n; j++) {total += costs[(p[j] - 1) * n + j - 1];}
+            if(total < best_total) {
+                best_total = total;
+                *global_reverse = direction;
+                for(size_t j = 1; j <= n; j++) {assignment[p[j] - 1] = j - 1;}
+            }
+        }
     }
-    for(size_t j = 1; j <= n; j++) {assignment[p[j] - 1] = j - 1;}
     *source = left;
     *target = right;
     *matching = assignment;
@@ -511,6 +547,7 @@ cleanup:
     free(u);
     free(v);
     free(minimum);
+    free(costs);
     free(used);
     return(success);
 }
@@ -521,7 +558,8 @@ int path_morphable(const VectorPath *a, const VectorPath *b)
     MorphSubpath *target = NULL;
     size_t *matching = NULL;
     size_t count;
-    int result = path_match_subpaths(a, b, &source, &target, &matching, &count);
+    int global_reverse;
+    int result = path_match_subpaths(a, b, &source, &target, &matching, &count, &global_reverse);
 
     free(source);
     free(target);
@@ -546,12 +584,34 @@ static int bezier_interval(const Bezier *curve, double begin, double end, Bezier
     return(1);
 }
 
-static int path_interpolate_matched(const VectorPath *a, const VectorPath *b, float alpha,
-    VectorPath *output, MorphSubpath *source, MorphSubpath *target, size_t *matching, size_t count)
+static int morph_cut_contour(const VectorPath *path, const MorphSubpath *subpath,
+    size_t offset, int reverse, double fraction, VectorPath *result)
 {
-    size_t closed_count = 0;
+    size_t count = subpath->end - subpath->start;
+    Bezier first = morph_segment(path, subpath, 0, offset, reverse);
+    Bezier before, after;
 
-    for(size_t i = 0; i < count; i++) {if(source[i].closed) {closed_count++;}}
+    if(!bezier_subdivide(&first, fraction, &before, &after)) {return(0);}
+    result->segments[0] = after;
+    for(size_t i = 1; i < count; i++) {result->segments[i] = morph_segment(path, subpath, i, offset, reverse);}
+    result->segments[count] = before;
+    result->count = count + 1;
+    return(1);
+}
+
+static double morph_cut_cost(const VectorPath *a, const MorphSubpath *left,
+    const VectorPath *candidate, const MorphSubpath *right)
+{
+    ManicVec2 p = a->segments[left->start].points[0];
+    ManicVec2 q = candidate->segments[0].points[0];
+
+    return(morph_alignment(a, left, candidate, right, 0, 0) +
+        0.5 * hypot((double)p.x - q.x, (double)p.y - q.y));
+}
+
+static int path_interpolate_matched(const VectorPath *a, const VectorPath *b, float alpha,
+    VectorPath *output, MorphSubpath *source, MorphSubpath *target, size_t *matching, size_t count, int global_reverse)
+{
     for(size_t subpath = 0; subpath < count; subpath++) {
         MorphSubpath *left = &source[subpath];
         MorphSubpath *right = &target[matching[subpath]];
@@ -563,11 +623,62 @@ static int path_interpolate_matched(const VectorPath *a, const VectorPath *b, fl
         size_t offset;
         int reverse;
         Bezier first;
+        VectorPath cut = {0};
+        MorphSubpath cut_description = {0};
+        const VectorPath *right_path = b;
+        double best;
 
-        morph_best_alignment(a, left, b, right, !left->closed || closed_count == 1, &offset, &reverse);
+        best = morph_best_alignment(a, left, b, right,
+            count == 1 ? 1 : (global_reverse ? 2 : 0), &offset, &reverse);
         first = morph_segment(b, right, 0, offset, reverse);
+        if(right->closed && nb < 1024 && nb < SIZE_MAX / sizeof(*cut.segments) - 1) {
+            ManicVec2 start = a->segments[left->start].points[0];
+            double best_cut = 0;
+            size_t best_offset = offset;
+
+            best += 0.5 * hypot((double)start.x - first.points[0].x, (double)start.y - first.points[0].y);
+            cut.segments = malloc((nb + 1) * sizeof(*cut.segments));
+            if(cut.segments == NULL) {return(0);}
+            cut_description = (MorphSubpath){0, nb + 1, 1, 0, 0, 0, 0};
+            for(int side = 0; side < 2; side++) {
+                size_t candidate = side ? (offset + nb - 1) % nb : offset;
+
+                for(int sample = 1; sample < 32; sample++) {
+                    double fraction = sample / 32.0;
+                    double cost;
+
+                    if(!morph_cut_contour(b, right, candidate, reverse, fraction, &cut)) {free(cut.segments); return(0);}
+                    cost = morph_cut_cost(a, left, &cut, &cut_description);
+                    if(cost < best) {best = cost; best_cut = fraction; best_offset = candidate;}
+                }
+            }
+            if(best_cut > 0) {
+                double lo = fmax(0.000001, best_cut - 1.0 / 32);
+                double hi = fmin(0.999999, best_cut + 1.0 / 32);
+
+                for(int i = 0; i < 16; i++) {
+                    double x = (2 * lo + hi) / 3;
+                    double y = (lo + 2 * hi) / 3;
+                    double cx, cy;
+
+                    if(!morph_cut_contour(b, right, best_offset, reverse, x, &cut)) {free(cut.segments); return(0);}
+                    cx = morph_cut_cost(a, left, &cut, &cut_description);
+                    if(!morph_cut_contour(b, right, best_offset, reverse, y, &cut)) {free(cut.segments); return(0);}
+                    cy = morph_cut_cost(a, left, &cut, &cut_description);
+                    if(cx < cy) {hi = y;}
+                    else {lo = x;}
+                }
+                if(!morph_cut_contour(b, right, best_offset, reverse, (lo + hi) / 2, &cut)) {free(cut.segments); return(0);}
+                right_path = &cut;
+                right = &cut_description;
+                nb++;
+                offset = 0;
+                reverse = 0;
+                first = cut.segments[0];
+            }
+        }
         if(!path_move_to(output, vector_lerp(a->segments[left->start].points[0],
-            first.points[0], alpha))) {return(0);}
+            first.points[0], alpha))) {free(cut.segments); return(0);}
         while(sa < na && sb < nb) {
             double nexta = (double)(sa + 1) / na;
             double nextb = (double)(sb + 1) / nb;
@@ -576,17 +687,18 @@ static int path_interpolate_matched(const VectorPath *a, const VectorPath *b, fl
             Bezier cb;
             ManicVec2 points[4];
 
-            Bezier segment = morph_segment(b, right, sb, offset, reverse);
+            Bezier segment = morph_segment(right_path, right, sb, offset, reverse);
 
             if(!bezier_interval(&a->segments[left->start + sa], t * na - sa, next * na - sa, &ca) ||
-                !bezier_interval(&segment, t * nb - sb, next * nb - sb, &cb)) {return(0);}
+                !bezier_interval(&segment, t * nb - sb, next * nb - sb, &cb)) {free(cut.segments); return(0);}
             for(int j = 0; j < 4; j++) {points[j] = vector_lerp(ca.points[j], cb.points[j], alpha);}
-            if(!path_cubic_to(output, points[1], points[2], points[3])) {return(0);}
+            if(!path_cubic_to(output, points[1], points[2], points[3])) {free(cut.segments); return(0);}
             t = next;
             if(nexta <= nextb) {sa++;}
             if(nextb <= nexta) {sb++;}
         }
         if(left->closed) {output->segments[output->count - 1].closes_subpath = 1; output->closed = 1;}
+        free(cut.segments);
     }
     return(1);
 }
@@ -596,10 +708,11 @@ int path_interpolate(const VectorPath *a, const VectorPath *b, float alpha, Vect
     MorphSubpath *source = NULL, *target = NULL;
     size_t *matching = NULL, count = 0;
     int success;
+    int global_reverse;
 
     if(output == NULL || output == a || output == b || !isfinite(alpha) || alpha < 0 || alpha > 1 ||
-        !path_match_subpaths(a, b, &source, &target, &matching, &count)) {return(0);}
-    success = path_interpolate_matched(a, b, alpha, output, source, target, matching, count);
+        !path_match_subpaths(a, b, &source, &target, &matching, &count, &global_reverse)) {return(0);}
+    success = path_interpolate_matched(a, b, alpha, output, source, target, matching, count, global_reverse);
     free(source);
     free(target);
     free(matching);
@@ -610,12 +723,13 @@ MorphCache *morph_cache_create(const VectorPath *a, const VectorPath *b)
 {
     MorphSubpath *source = NULL, *target = NULL;
     size_t *matching = NULL, count = 0;
+    int global_reverse;
     MorphCache *cache = calloc(1, sizeof(*cache));
-    int ok = cache && path_match_subpaths(a, b, &source, &target, &matching, &count);
+    int ok = cache && path_match_subpaths(a, b, &source, &target, &matching, &count, &global_reverse);
 
     if(ok) {
-        ok = path_interpolate_matched(a, b, 0, &cache->left, source, target, matching, count) &&
-            path_interpolate_matched(a, b, 1, &cache->right, source, target, matching, count);
+        ok = path_interpolate_matched(a, b, 0, &cache->left, source, target, matching, count, global_reverse) &&
+            path_interpolate_matched(a, b, 1, &cache->right, source, target, matching, count, global_reverse);
     }
     free(source);
     free(target);
@@ -728,4 +842,105 @@ double bezier_arc_parameter(const Bezier *curve, double fraction)
     ArcCache cache;
 
     return(bezier_arc_table(curve, &cache) ? bezier_arc_lookup(&cache, fraction) : fraction);
+}
+
+struct PathArcCache {
+    VectorPath path;
+    double *lengths;
+    double tolerance;
+};
+
+static int path_arc_integral(const Bezier *curve, double begin, double end, double whole,
+    double tolerance, int depth, int *budget, double *result)
+{
+    double middle = (begin + end) / 2;
+    double left = bezier_arc_integral(curve, begin, middle);
+    double right = bezier_arc_integral(curve, middle, end);
+    double combined = left + right;
+
+    if((*budget)-- <= 0 || !isfinite(combined)) {return(0);}
+    if(fabs(combined - whole) <= tolerance) {*result = combined; return(1);}
+    if(depth == 0) {return(0);}
+    if(!path_arc_integral(curve, begin, middle, left, tolerance / 2, depth - 1, budget, &left) ||
+        !path_arc_integral(curve, middle, end, right, tolerance / 2, depth - 1, budget, &right)) {return(0);}
+    *result = left + right;
+    return(1);
+}
+
+PathArcCache *path_arc_create(const VectorPath *path, double tolerance)
+{
+    PathArcCache *cache;
+
+    if(path == NULL || path->count == 0 || path->segments == NULL || !isfinite(tolerance) || tolerance <= 0 ||
+        path->count > (SIZE_MAX / sizeof(double)) - 1) {return(NULL);}
+    cache = calloc(1, sizeof(*cache));
+    if(cache == NULL) {return(NULL);}
+    cache->lengths = calloc(path->count + 1, sizeof(*cache->lengths));
+    cache->tolerance = tolerance;
+    if(cache->lengths == NULL || !path_clone(&cache->path, path)) {path_arc_destroy(cache); return(NULL);}
+    for(size_t i = 0; i < path->count; i++) {
+        const Bezier *curve = &path->segments[i];
+        double length;
+        double whole;
+        int budget = 8192;
+
+        if(curve->degree < 1 || curve->degree > 3 || (i && curve->starts_subpath)) {path_arc_destroy(cache); return(NULL);}
+        for(int j = 0; j <= curve->degree; j++) {
+            if(!vector_valid(curve->points[j])) {path_arc_destroy(cache); return(NULL);}
+        }
+        if(i) {
+            const Bezier *previous = &path->segments[i - 1];
+            ManicVec2 end = previous->points[previous->degree];
+
+            if(end.x != curve->points[0].x || end.y != curve->points[0].y) {path_arc_destroy(cache); return(NULL);}
+        }
+        whole = bezier_arc_integral(curve, 0, 1);
+        if(!path_arc_integral(curve, 0, 1, whole, tolerance / path->count, 20, &budget, &length)) {
+            path_arc_destroy(cache);
+            return(NULL);
+        }
+        cache->lengths[i + 1] = cache->lengths[i] + length;
+    }
+    return(cache);
+}
+
+void path_arc_destroy(PathArcCache *cache)
+{
+    if(cache == NULL) {return;}
+    path_destroy(&cache->path);
+    free(cache->lengths);
+    free(cache);
+}
+
+int path_arc_point(const PathArcCache *cache, double fraction, ManicVec2 *point)
+{
+    size_t low = 0, high;
+    double target, begin = 0, end = 1;
+    const Bezier *curve;
+
+    if(cache == NULL || point == NULL || !isfinite(fraction) || fraction < 0 || fraction > 1) {return(0);}
+    high = cache->path.count;
+    if(fraction == 0) {return(bezier_evaluate(&cache->path.segments[0], 0, point));}
+    if(fraction == 1) {return(bezier_evaluate(&cache->path.segments[high - 1], 1, point));}
+    target = cache->lengths[high] * fraction;
+    if(target == 0) {return(bezier_evaluate(&cache->path.segments[0], 0, point));}
+    while(low + 1 < high) {
+        size_t middle = low + (high - low) / 2;
+
+        if(cache->lengths[middle] < target) {low = middle;}
+        else {high = middle;}
+    }
+    curve = &cache->path.segments[low];
+    target -= cache->lengths[low];
+    for(int i = 0; i < 40; i++) {
+        double middle = (begin + end) / 2;
+        double length;
+        double whole = bezier_arc_integral(curve, 0, middle);
+        int budget = 8192;
+
+        if(!path_arc_integral(curve, 0, middle, whole, cache->tolerance / cache->path.count, 20, &budget, &length)) {return(0);}
+        if(length < target) {begin = middle;}
+        else {end = middle;}
+    }
+    return(bezier_evaluate(curve, (begin + end) / 2, point));
 }

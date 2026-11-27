@@ -21,6 +21,15 @@ static inline int scene_slot(const Scene *scene, int handle)
     return((int)slot);
 }
 
+struct SceneUpdater {
+    int node;
+    int tracker;
+    ScenePositionUpdater function;
+    const void *context;
+    double line_dx;
+    double line_dy;
+};
+
 struct MorphCache {
     const VectorPath *source;
     const VectorPath *target;
@@ -34,8 +43,11 @@ typedef struct {
     double lengths[129];
 } ArcCache;
 
+typedef struct PathArcCache PathArcCache;
+
 struct AnimationCache {
     ArcCache *arc_lengths;
+    PathArcCache *path_arc;
     MorphCache *morphs;
 };
 
@@ -55,10 +67,15 @@ int vector_valid(ManicVec2);
 ManicVec2 vector_lerp(ManicVec2, ManicVec2, double);
 int bezier_arc_table(const Bezier *, ArcCache *);
 double bezier_arc_lookup(const ArcCache *, double);
+PathArcCache *path_arc_create(const VectorPath *, double);
+void path_arc_destroy(PathArcCache *);
+int path_arc_point(const PathArcCache *, double, ManicVec2 *);
 MorphCache *morph_cache_create(const VectorPath *, const VectorPath *);
 int path_interpolate_cached(const MorphCache *, float, VectorPath *);
 void animation_interpolate(const Animation *, const Mobject *, Mobject *, const Scene *, const AnimationCache *, float);
 void timeline_invalidate_checkpoints(Timeline *);
+int scene_parent_valid(const Scene *, int, int);
+int scene_apply_updaters(Scene *);
 Vector2 raylib_vector(ManicVec2);
 Color raylib_color(ManicColor);
 ManicVec2 camera_to_screen(const ManicCamera *, ManicVec2, int, int);
@@ -78,5 +95,7 @@ int benchmark_scene_build(Scene *);
 int paths_scene_build(Scene *);
 int animations_scene_build(Scene *);
 int math_scene_build(Scene *);
+int plane_scene_build(Scene *);
+int tracker_scene_build(Scene *);
 
 #endif

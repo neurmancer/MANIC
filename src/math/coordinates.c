@@ -279,21 +279,34 @@ static int number_glyph(VectorPath *path, char character, float x, float height)
     return(1);
 }
 
-int scene_number_label(Scene *scene, double value, ManicVec2 position, float height, ManicColor color)
+int scene_number_label_formatted(Scene *scene, double value, ManicVec2 position, float height,
+    ManicColor color, NumberFormat format)
 {
     VectorPath path = {0};
-    char text[32];
+    char text[384];
     size_t length;
+    float alignment;
     int id = -1;
     int written;
 
-    if(!isfinite(value) || !vector_valid(position) || !isfinite(height) || height <= 0) {return(-1);}
+    if(scene == NULL || !isfinite(value) || !vector_valid(position) || !isfinite(height) || height <= 0 ||
+        format.notation < NUMBER_GENERAL || format.notation > NUMBER_SCIENTIFIC ||
+        format.alignment < NUMBER_ALIGN_LEFT || format.alignment > NUMBER_ALIGN_RIGHT ||
+        format.precision < 0 || format.precision > 12) {return(-1);}
     if(value == 0.0) {value = 0.0;}
-    written = snprintf(text, sizeof(text), "%.6g", value);
+    if(format.notation == NUMBER_FIXED) {
+        written = snprintf(text, sizeof(text), format.show_plus ? "%+.*f" : "%.*f", format.precision, value);
+    }
+    else if(format.notation == NUMBER_SCIENTIFIC) {
+        written = snprintf(text, sizeof(text), format.show_plus ? "%+.*e" : "%.*e", format.precision, value);
+    }
+    else {written = snprintf(text, sizeof(text), format.show_plus ? "%+.*g" : "%.*g", format.precision, value);}
     if(written < 0 || (size_t)written >= sizeof(text)) {return(-1);}
     length = (size_t)written;
+    alignment = format.alignment == NUMBER_ALIGN_LEFT ? 0 :
+        (format.alignment == NUMBER_ALIGN_RIGHT ? (float)length * 0.8f - 0.2f : ((float)length * 0.8f - 0.2f) / 2);
     for(size_t i = 0; i < length; i++) {
-        float x = ((float)i * 0.8f - ((float)length * 0.8f - 0.2f) / 2.0f) * height;
+        float x = ((float)i * 0.8f - alignment) * height;
 
         if(!number_glyph(&path, text[i], x, height)) {goto cleanup;}
     }
@@ -302,6 +315,12 @@ int scene_number_label(Scene *scene, double value, ManicVec2 position, float hei
 cleanup:
     path_destroy(&path);
     return(id);
+}
+
+int scene_number_label(Scene *scene, double value, ManicVec2 position, float height, ManicColor color)
+{
+    return(scene_number_label_formatted(scene, value, position, height, color,
+        (NumberFormat){NUMBER_GENERAL, NUMBER_ALIGN_CENTER, 6, 0}));
 }
 
 int scene_axes_labels(Scene *scene, const MathAxes *axes, float tick_step, float height, ManicColor color)
@@ -371,4 +390,49 @@ int scene_number_line_labels(Scene *scene, int group, ManicVec2 start, ManicVec2
         if(!scene_set_parent(scene, label, group)) {scene_remove(scene, label); return(0);}
     }
     return(1);
+}
+
+int scene_number_plane(Scene *scene, MathAxes *axes, ManicVec2 position,
+    float tick_step, float grid_step, ManicColor axis_color, ManicColor grid_color)
+{
+    VectorPath grid = {0};
+    double first_x, first_y, count_x, count_y;
+    int id = -1;
+    int result = 0;
+
+    if(scene == NULL || axes == NULL || !isfinite(grid_step) || grid_step <= 0) {return(0);}
+    first_x = ceil((double)axes->x_min / grid_step);
+    first_y = ceil((double)axes->y_min / grid_step);
+    count_x = floor((double)axes->x_max / grid_step) - first_x + 1;
+    count_y = floor((double)axes->y_max / grid_step) - first_y + 1;
+    if(!isfinite(first_x) || !isfinite(first_y) || fabs(first_x) > 1e12 || fabs(first_y) > 1e12 ||
+        !isfinite(count_x) || !isfinite(count_y) || count_x < 0 || count_y < 0 ||
+        count_x > 10000 || count_y > 10000) {return(0);}
+    for(int axis = 0; axis < 2; axis++) {
+        double first = axis ? first_y : first_x;
+        int count = (int)(axis ? count_y : count_x);
+
+        for(int i = 0; i < count; i++) {
+            double value = (first + i) * grid_step;
+            ManicVec2 a, b;
+
+            if(!axes_point(axes, axis ? axes->x_min : value, axis ? value : axes->y_min, &a) ||
+                !axes_point(axes, axis ? axes->x_max : value, axis ? value : axes->y_max, &b) ||
+                !path_move_to(&grid, a) || !path_line_to(&grid, b)) {goto cleanup;}
+        }
+    }
+    if(!scene_axes(scene, axes, position, tick_step, axis_color)) {goto cleanup;}
+    if(grid.count) {
+        id = scene_add(scene, path_mobject(&grid, (ManicVec2){0}, grid_color, (ManicColor){0}, 1));
+        if(id < 0 || !scene_set_parent(scene, id, axes->group) || !scene_set_layer(scene, id, -1)) {
+            if(id >= 0) {scene_remove(scene, id);}
+            scene_remove(scene, axes->group);
+            goto cleanup;
+        }
+    }
+    result = 1;
+
+cleanup:
+    path_destroy(&grid);
+    return(result);
 }
