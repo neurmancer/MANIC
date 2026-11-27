@@ -21,13 +21,23 @@ static inline int scene_slot(const Scene *scene, int handle)
     return((int)slot);
 }
 
+typedef enum {
+    UPDATER_POSITION = SCENE_BIND_POSITION,
+    UPDATER_ROTATION = SCENE_BIND_ROTATION,
+    UPDATER_OPACITY = SCENE_BIND_OPACITY
+} SceneUpdaterType;
+
 struct SceneUpdater {
     int node;
     int tracker;
-    ScenePositionUpdater function;
+    SceneUpdaterType type;
+    ScenePositionUpdater position;
+    SceneScalarUpdater scalar;
     const void *context;
+    void *owned_context;
     double line_dx;
     double line_dy;
+    double line_scale;
 };
 
 struct MorphCache {
@@ -35,6 +45,7 @@ struct MorphCache {
     const VectorPath *target;
     VectorPath left;
     VectorPath right;
+    int expanded;
     struct MorphCache *next;
 };
 
@@ -72,10 +83,24 @@ void path_arc_destroy(PathArcCache *);
 int path_arc_point(const PathArcCache *, double, ManicVec2 *);
 MorphCache *morph_cache_create(const VectorPath *, const VectorPath *);
 int path_interpolate_cached(const MorphCache *, float, VectorPath *);
-void animation_interpolate(const Animation *, const Mobject *, Mobject *, const Scene *, const AnimationCache *, float);
+void animation_interpolate(const Animation *, const Mobject *, Mobject *, const Scene *, const AnimationCache *, double);
+double animation_duration(const Animation *);
+double timeline_action_duration(const SceneAction *);
 void timeline_invalidate_checkpoints(Timeline *);
+typedef enum {
+    EDIT_PARENT,
+    EDIT_LAYER,
+    EDIT_TRACKER,
+    EDIT_BINDING
+} TimelineEditType;
+
+int timeline_record_edit(Timeline *, TimelineEditType, int, int, double);
+int timeline_reserve_edits(Timeline *, int);
+void timeline_retract_edit(Timeline *);
+int timeline_binding_has_edits(const Timeline *, int, SceneUpdaterType);
 int scene_parent_valid(const Scene *, int, int);
 int scene_apply_updaters(Scene *);
+int scene_updater_conflicts(SceneUpdaterType, AnimationType);
 Vector2 raylib_vector(ManicVec2);
 Color raylib_color(ManicColor);
 ManicVec2 camera_to_screen(const ManicCamera *, ManicVec2, int, int);

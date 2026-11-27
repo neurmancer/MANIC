@@ -29,9 +29,10 @@ for name in access_lifetime_test animation_precision_test bezier_bounds_test che
     morph_match_test morph_stress_test morph_winding_test path_timeline_test regression \
     reuse_morph_test reuse_test reused_axes_test roadmap_test timing_compare_test \
     stage1_motion_test stage1_morph_test stage1_arc_stress_test stage2_math_test stage2_property_test stage2_scene_test \
-    stage3_replay_test stage3_consistency_test stage3_example_test; do
+    stage3_replay_test stage3_consistency_test stage3_example_test multisubpath_motion_test tracker_bindings_test binding_schedule_test binding_context_test parametric_append_test live_edit_test snapshot_lifetime_test live_binding_test precise_timing_test morph_contour_count_test live_registration_test; do
     compile_and_run "$name"
 done
+compile_and_run parametric_append_oom_test -Wl,--wrap=malloc
 compile_and_run export_recovery_test \
     -Wl,--wrap=link -Wl,--wrap=SetConfigFlags -Wl,--wrap=InitWindow -Wl,--wrap=IsWindowReady \
     -Wl,--wrap=LoadRenderTexture -Wl,--wrap=IsRenderTextureValid -Wl,--wrap=BeginTextureMode \
@@ -42,6 +43,7 @@ compile_and_run export_recovery_test \
 if [ "${MANIC_TEST_GRAPHICS:-0}" = 1 ]; then
     compile_and_run export_real_recovery_test -Wl,--wrap=ExportImage -Wl,--wrap=link
     compile_and_run video_roundtrip_test
+    compile_and_run morph_growth_visual_test
 else
     printf 'Graphics and video tests skipped; set MANIC_TEST_GRAPHICS=1 with a working display and ffmpeg.\n'
 fi

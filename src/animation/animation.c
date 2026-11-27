@@ -119,7 +119,7 @@ Animation animation_tracker_to(int tracker, double value, float duration)
     return(animation);
 }
 
-static float animation_ease(Easing easing, float alpha)
+static double animation_ease(Easing easing, double alpha)
 {
     if(alpha < 0.0f) {alpha = 0.0f;}
     if(alpha > 1.0f) {alpha = 1.0f;}
@@ -135,7 +135,7 @@ static unsigned char interpolate_channel(unsigned char start, unsigned char end,
 }
 
 void animation_interpolate(const Animation *animation, const Mobject *start,
-    Mobject *mobject, const Scene *scene, const AnimationCache *cache, float alpha)
+    Mobject *mobject, const Scene *scene, const AnimationCache *cache, double alpha)
 {
     alpha = animation_ease(animation->easing, alpha);
     if(animation->type == ANIMATION_TRACKER) {
@@ -172,6 +172,7 @@ void animation_interpolate(const Animation *animation, const Mobject *start,
         mobject->size.x = start->size.x * factor;
         mobject->size.y = start->size.y * factor;
         if(mobject->type == MOBJECT_LINE) {
+            mobject->line_scale = start->line_scale * factor;
             mobject->end.x = start->position.x + (start->end.x - start->position.x) * factor;
             mobject->end.y = start->position.y + (start->end.y - start->position.y) * factor;
         }
@@ -234,6 +235,18 @@ void animation_interpolate(const Animation *animation, const Mobject *start,
             }
         }
     }
+}
+
+double animation_duration(const Animation *animation)
+{
+    return(animation->has_precise_duration ? animation->precise_duration : animation->duration);
+}
+
+Animation animation_with_duration_precise(Animation animation, double duration)
+{
+    animation.precise_duration = duration;
+    animation.has_precise_duration = 1;
+    return(animation);
 }
 
 Animation animation_with_offset(Animation animation, float offset)

@@ -17,6 +17,7 @@ Mobject line_create(ManicVec2 start, ManicVec2 end, ManicColor color)
     Mobject line = {0};
 
     line.type = MOBJECT_LINE;
+    line.line_scale = 1.0f;
     line.position = start;
     line.end = end;
     line.stroke_width = 3.0f;

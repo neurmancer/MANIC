@@ -126,7 +126,7 @@ int path_parametric_graph(VectorPath *output, const MathAxes *axes, MathParametr
     size_t next_break = 0;
     int result = 0;
 
-    if(output == NULL || output->segments != NULL || output->count != 0 || function == NULL ||
+    if(output == NULL || (output->count && output->segments == NULL) || function == NULL ||
         !isfinite(minimum) || !isfinite(maximum) || maximum <= minimum || !isfinite(maximum - minimum) ||
         samples < 2 || samples > 1000000 || sampling.max_depth < 0 || sampling.max_depth > 20 ||
         !isfinite(sampling.tolerance) || sampling.tolerance <= 0 || (break_count && !breaks) ||
@@ -164,6 +164,23 @@ int path_parametric_graph(VectorPath *output, const MathAxes *axes, MathParametr
         }
     }
     if(builder.path.count == 0) {goto cleanup;}
+    if(output->segments != NULL || output->count != 0) {
+        size_t count;
+        Bezier *segments;
+
+        if(output->count > SIZE_MAX - builder.path.count) {goto cleanup;}
+        count = output->count + builder.path.count;
+        if(count > SIZE_MAX / sizeof(*segments)) {goto cleanup;}
+        segments = malloc(count * sizeof(*segments));
+        if(segments == NULL) {goto cleanup;}
+        if(output->count) {memcpy(segments, output->segments, output->count * sizeof(*segments));}
+        memcpy(segments + output->count, builder.path.segments, builder.path.count * sizeof(*segments));
+        free(output->segments);
+        free(builder.path.segments);
+        builder.path.segments = segments;
+        builder.path.count = count;
+        builder.path.capacity = count;
+    }
     *output = builder.path;
     builder.path = (VectorPath){0};
     result = 1;

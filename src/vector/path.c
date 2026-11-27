@@ -317,7 +317,8 @@ static int path_describe_subpaths(const VectorPath *path, MorphSubpath **result,
     size_t start = 0;
     MorphSubpath *items;
 
-    if(path == NULL || path->count == 0) {return(0);}
+    if(path == NULL || (path->count && path->segments == NULL)) {return(0);}
+    if(path->count == 0) {*result = NULL; *count = 0; return(1);}
     while(start < path->count) {
         size_t end;
         int closed;
@@ -552,18 +553,87 @@ cleanup:
     return(success);
 }
 
+static int path_morph_prepare(const VectorPath *a, const VectorPath *b,
+    VectorPath *left, VectorPath *right, int *expanded)
+{
+    MorphSubpath *source = NULL, *target = NULL;
+    size_t source_count = 0, target_count = 0;
+    size_t source_types[2] = {0}, target_types[2] = {0};
+    int result = 0;
+
+    if(!path_describe_subpaths(a, &source, &source_count) ||
+        !path_describe_subpaths(b, &target, &target_count)) {goto cleanup;}
+    for(size_t i = 0; i < source_count; i++) {source_types[source[i].closed != 0]++;}
+    for(size_t i = 0; i < target_count; i++) {target_types[target[i].closed != 0]++;}
+    if(source_count == 0 && target_count == 0) {goto cleanup;}
+    *expanded = source_types[0] != target_types[0] || source_types[1] != target_types[1];
+    if(!*expanded) {result = 1; goto cleanup;}
+    if(!path_clone(left, a) || !path_clone(right, b)) {goto cleanup;}
+    for(int type = 0; type < 2; type++) {
+        size_t deficit = source_types[type] < target_types[type] ? target_types[type] - source_types[type] :
+            source_types[type] - target_types[type];
+        MorphSubpath *larger = source_types[type] < target_types[type] ? target : source;
+        size_t larger_count = source_types[type] < target_types[type] ? target_count : source_count;
+        VectorPath *smaller = source_types[type] < target_types[type] ? left : right;
+
+        for(size_t i = larger_count; i > 0 && deficit; i--) {
+            MorphSubpath *item = &larger[i - 1];
+            ManicVec2 point;
+
+            if((item->closed != 0) != type) {continue;}
+            point = (ManicVec2){(float)item->center_x, (float)item->center_y};
+            if(!path_move_to(smaller, point) || !path_line_to(smaller, point) ||
+                (type && !path_close(smaller))) {goto cleanup;}
+            deficit--;
+        }
+    }
+    result = 1;
+
+cleanup:
+    free(source);
+    free(target);
+    if(!result) {path_destroy(left); path_destroy(right);}
+    return(result);
+}
+
+static int path_append_exact(VectorPath *output, const VectorPath *source)
+{
+    Bezier *segments;
+    size_t count;
+
+    if(source->count == 0) {return(1);}
+    if(output->count > SIZE_MAX - source->count) {return(0);}
+    count = output->count + source->count;
+    if(count > SIZE_MAX / sizeof(*segments)) {return(0);}
+    segments = realloc(output->segments, count * sizeof(*segments));
+    if(segments == NULL && count) {return(0);}
+    output->segments = segments;
+    if(source->count) {memcpy(segments + output->count, source->segments, source->count * sizeof(*segments));}
+    output->count = count;
+    output->capacity = count;
+    output->current = source->current;
+    output->subpath_start = source->subpath_start;
+    output->has_current = source->has_current;
+    output->new_subpath = source->new_subpath;
+    output->closed = source->closed;
+    return(1);
+}
+
 int path_morphable(const VectorPath *a, const VectorPath *b)
 {
-    MorphSubpath *source = NULL;
-    MorphSubpath *target = NULL;
-    size_t *matching = NULL;
-    size_t count;
-    int global_reverse;
-    int result = path_match_subpaths(a, b, &source, &target, &matching, &count, &global_reverse);
+    MorphSubpath *source = NULL, *target = NULL;
+    VectorPath left = {0}, right = {0};
+    size_t *matching = NULL, count;
+    int global_reverse, expanded = 0;
+    int result = path_morph_prepare(a, b, &left, &right, &expanded) &&
+        path_match_subpaths(expanded ? &left : a, expanded ? &right : b,
+            &source, &target, &matching, &count, &global_reverse);
 
     free(source);
     free(target);
     free(matching);
+    path_destroy(&left);
+    path_destroy(&right);
     return(result);
 }
 
@@ -706,34 +776,49 @@ static int path_interpolate_matched(const VectorPath *a, const VectorPath *b, fl
 int path_interpolate(const VectorPath *a, const VectorPath *b, float alpha, VectorPath *output)
 {
     MorphSubpath *source = NULL, *target = NULL;
+    VectorPath left = {0}, right = {0};
     size_t *matching = NULL, count = 0;
-    int success;
-    int global_reverse;
+    int success = 0, global_reverse, expanded = 0;
+    const VectorPath *first, *second;
 
     if(output == NULL || output == a || output == b || !isfinite(alpha) || alpha < 0 || alpha > 1 ||
-        !path_match_subpaths(a, b, &source, &target, &matching, &count, &global_reverse)) {return(0);}
-    success = path_interpolate_matched(a, b, alpha, output, source, target, matching, count, global_reverse);
+        !path_morph_prepare(a, b, &left, &right, &expanded)) {return(0);}
+    first = expanded ? &left : a;
+    second = expanded ? &right : b;
+    if(!path_match_subpaths(first, second, &source, &target, &matching, &count, &global_reverse)) {goto cleanup;}
+    if(expanded && (alpha == 0 || alpha == 1)) {success = path_append_exact(output, alpha == 0 ? a : b);}
+    else {success = path_interpolate_matched(first, second, alpha, output, source, target, matching, count, global_reverse);}
+
+cleanup:
     free(source);
     free(target);
     free(matching);
+    path_destroy(&left);
+    path_destroy(&right);
     return(success);
 }
 
 MorphCache *morph_cache_create(const VectorPath *a, const VectorPath *b)
 {
     MorphSubpath *source = NULL, *target = NULL;
+    VectorPath left = {0}, right = {0};
     size_t *matching = NULL, count = 0;
-    int global_reverse;
+    int global_reverse, expanded = 0;
     MorphCache *cache = calloc(1, sizeof(*cache));
-    int ok = cache && path_match_subpaths(a, b, &source, &target, &matching, &count, &global_reverse);
+    int ok = cache && path_morph_prepare(a, b, &left, &right, &expanded);
+    const VectorPath *first = expanded ? &left : a;
+    const VectorPath *second = expanded ? &right : b;
 
+    if(ok) {ok = path_match_subpaths(first, second, &source, &target, &matching, &count, &global_reverse);}
     if(ok) {
-        ok = path_interpolate_matched(a, b, 0, &cache->left, source, target, matching, count, global_reverse) &&
-            path_interpolate_matched(a, b, 1, &cache->right, source, target, matching, count, global_reverse);
+        ok = path_interpolate_matched(first, second, 0, &cache->left, source, target, matching, count, global_reverse) &&
+            path_interpolate_matched(first, second, 1, &cache->right, source, target, matching, count, global_reverse);
     }
     free(source);
     free(target);
     free(matching);
+    path_destroy(&left);
+    path_destroy(&right);
     if(!ok) {
         if(cache) {
             path_destroy(&cache->left);
@@ -744,11 +829,15 @@ MorphCache *morph_cache_create(const VectorPath *a, const VectorPath *b)
     }
     cache->source = a;
     cache->target = b;
+    cache->expanded = expanded;
     return(cache);
 }
 
 int path_interpolate_cached(const MorphCache *cache, float alpha, VectorPath *output)
 {
+    if(cache->expanded && (alpha == 0 || alpha == 1)) {
+        return(path_clone(output, alpha == 0 ? cache->source : cache->target));
+    }
     if(!path_clone(output, &cache->left)) {return(0);}
     for(size_t i = 0; i < output->count; i++) {
         for(int j = 0; j <= output->segments[i].degree; j++) {
@@ -884,11 +973,11 @@ PathArcCache *path_arc_create(const VectorPath *path, double tolerance)
         double whole;
         int budget = 8192;
 
-        if(curve->degree < 1 || curve->degree > 3 || (i && curve->starts_subpath)) {path_arc_destroy(cache); return(NULL);}
+        if(curve->degree < 1 || curve->degree > 3) {path_arc_destroy(cache); return(NULL);}
         for(int j = 0; j <= curve->degree; j++) {
             if(!vector_valid(curve->points[j])) {path_arc_destroy(cache); return(NULL);}
         }
-        if(i) {
+        if(i && !curve->starts_subpath) {
             const Bezier *previous = &path->segments[i - 1];
             ManicVec2 end = previous->points[previous->degree];
 
@@ -929,6 +1018,19 @@ int path_arc_point(const PathArcCache *cache, double fraction, ManicVec2 *point)
 
         if(cache->lengths[middle] < target) {low = middle;}
         else {high = middle;}
+    }
+    {
+        float rounded = (float)fraction;
+        double lower = (double)rounded - nextafterf(rounded, -INFINITY);
+        double upper = (double)nextafterf(rounded, INFINITY) - rounded;
+        double uncertainty = 0.5 * fmax(lower, upper) * cache->lengths[cache->path.count];
+
+        if(low > 0 && target - cache->lengths[low] <= uncertainty) {
+            return(bezier_evaluate(&cache->path.segments[low - 1], 1, point));
+        }
+        if(high < cache->path.count && cache->lengths[high] - target <= uncertainty) {
+            return(bezier_evaluate(&cache->path.segments[high - 1], 1, point));
+        }
     }
     curve = &cache->path.segments[low];
     target -= cache->lengths[low];

@@ -23,6 +23,8 @@ typedef struct VectorPath VectorPath;
 typedef struct MorphCache MorphCache;
 typedef struct AnimationCache AnimationCache;
 typedef struct TimelineCheckpoint TimelineCheckpoint;
+typedef struct TimelineEdit TimelineEdit;
+typedef struct SceneSnapshot SceneSnapshot;
 typedef struct SceneUpdater SceneUpdater;
 
 typedef enum {
@@ -71,6 +73,7 @@ typedef struct {
     VectorPath *path;
     ManicColor fill_color;
     float path_scale;
+    float line_scale;
     unsigned char path_fill_alpha;
     PathCap path_cap;
     PathJoin path_join;
@@ -82,6 +85,7 @@ typedef struct {
     float morph_alpha;
     const MorphCache *morph_cache;
     double tracker_value;
+    unsigned int bindings_active;
 } Mobject;
 
 typedef enum {
@@ -122,6 +126,8 @@ typedef struct {
     const VectorPath *motion_path;
     double motion_tolerance;
     double target_value;
+    double precise_duration;
+    int has_precise_duration;
 } Animation;
 
 typedef enum {
@@ -130,7 +136,8 @@ typedef enum {
     ACTION_SHOW,
     ACTION_HIDE,
     ACTION_PARENT,
-    ACTION_LAYER
+    ACTION_LAYER,
+    ACTION_BINDING
 } ActionType;
 
 typedef struct {
@@ -141,9 +148,14 @@ typedef struct {
     AnimationCache *caches;
     int animation_count;
     float duration;
+    double precise_duration;
+    double duration_uncertainty;
+    int has_precise_duration;
     int node;
     int parent;
     int layer;
+    int binding;
+    int enabled;
 } SceneAction;
 
 typedef struct {
@@ -165,6 +177,10 @@ typedef struct {
     TimelineCheckpoint *checkpoints;
     int checkpoint_count;
     int checkpoint_capacity;
+    TimelineEdit *edits;
+    int edit_count;
+    int edit_capacity;
+    int edit_cursor;
     double elapsed;
 } Timeline;
 
@@ -181,6 +197,13 @@ typedef struct {
 } Scene;
 
 typedef int (*ScenePositionUpdater)(double, double, const void *, ManicVec2 *);
+typedef int (*SceneScalarUpdater)(double, double, const void *, double *);
+
+typedef enum {
+    SCENE_BIND_POSITION,
+    SCENE_BIND_ROTATION,
+    SCENE_BIND_OPACITY
+} SceneBindingType;
 
 
 typedef struct {
@@ -301,8 +324,13 @@ Animation animation_follow_path(int, const VectorPath *, double, float);
 Animation animation_morph_to(int, int, float);
 Animation animation_tracker_to(int, double, float);
 Animation animation_with_offset(Animation, float);
+Animation animation_with_duration_precise(Animation, double);
 Mobject *scene_get(Scene *, int);
 int scene_read(const Scene *, int, Mobject *);
+SceneSnapshot *scene_snapshot_create(const Scene *, int);
+const Mobject *scene_snapshot_get(const SceneSnapshot *);
+int scene_snapshot_refresh(SceneSnapshot *, const Scene *, int);
+void scene_snapshot_destroy(SceneSnapshot *);
 int scene_add(Scene *, Mobject);
 int scene_add_child(Scene *, int, Mobject);
 int scene_group(Scene *, ManicVec2, const int *, int);
@@ -310,7 +338,14 @@ int scene_tracker(Scene *, double);
 int scene_tracker_value(const Scene *, int, double *);
 int scene_tracker_set(Scene *, int, double);
 int scene_bind_position(Scene *, int, int, ScenePositionUpdater, const void *);
+int scene_bind_position_copy(Scene *, int, int, ScenePositionUpdater, const void *, size_t);
 int scene_unbind_position(Scene *, int);
+int scene_bind_rotation(Scene *, int, int, SceneScalarUpdater, const void *);
+int scene_bind_rotation_copy(Scene *, int, int, SceneScalarUpdater, const void *, size_t);
+int scene_unbind_rotation(Scene *, int);
+int scene_bind_opacity(Scene *, int, int, SceneScalarUpdater, const void *);
+int scene_bind_opacity_copy(Scene *, int, int, SceneScalarUpdater, const void *, size_t);
+int scene_unbind_opacity(Scene *, int);
 int scene_set_parent(Scene *, int, int);
 int scene_remove(Scene *, int);
 int scene_set_layer(Scene *, int, int);
@@ -318,18 +353,23 @@ int scene_collect_removed(Scene *);
 void scene_destroy(Scene *);
 int timeline_play_many(Timeline *, const Scene *, const Animation *, int);
 int timeline_wait(Timeline *, float);
+int timeline_wait_precise(Timeline *, double);
 int timeline_update(Timeline *, Scene *, double);
 int timeline_seek(Timeline *, Scene *, double);
+int scene_rewind(Scene *);
 int scene_schedule_add(Scene *, int);
 int scene_schedule_remove(Scene *, int);
 int scene_schedule_show(Scene *, int);
 int scene_schedule_parent(Scene *, int, int);
 int scene_schedule_layer(Scene *, int, int);
+int scene_schedule_binding(Scene *, int, SceneBindingType, int);
+int scene_set_binding(Scene *, int, SceneBindingType, int);
 int scene_play_many(Scene *, const Animation *, int);
 int scene_play_staggered(Scene *, const Animation *, int, float);
 int scene_play_sequence(Scene *, const Animation *, int);
 int scene_play(Scene *, Animation);
 int scene_wait(Scene *, float);
+int scene_wait_precise(Scene *, double);
 int scene_update(Scene *, double);
 RenderConfig render_config_default(void);
 int render_config_parse(RenderConfig *, int, char **);

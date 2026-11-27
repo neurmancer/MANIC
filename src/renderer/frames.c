@@ -9,20 +9,22 @@
 
 int scene_frame_intervals(const Scene *scene, int fps, unsigned long long *intervals)
 {
-    double duration = 0.0;
-    double count;
-    double uncertainty = 0.0;
-    double boundary;
+    long double duration = 0.0;
+    long double count;
+    long double uncertainty = 0.0;
+    long double boundary;
 
     if(scene == NULL || intervals == NULL || fps <= 0 ||
         scene->timeline.current_action != 0 || scene->timeline.action_started) {return(0);}
     for(int i = 0; i < scene->timeline.action_count; i++) {
-        double action_duration = scene->timeline.actions[i].duration;
+        const SceneAction *action = &scene->timeline.actions[i];
+        double action_duration = timeline_action_duration(action);
 
         if(!isfinite(action_duration) || action_duration < 0) {return(0);}
         duration += action_duration;
-        if(action_duration > 0.0) {
-            float value = scene->timeline.actions[i].duration;
+        if(action->has_precise_duration) {uncertainty += action->duration_uncertainty;}
+        else if(action_duration > 0.0) {
+            float value = action->duration;
             float next = nextafterf(value, INFINITY);
             float previous = nextafterf(value, -INFINITY);
             double upper = isfinite(next) ? (double)next - value : 0.0;
@@ -33,10 +35,10 @@ int scene_frame_intervals(const Scene *scene, int fps, unsigned long long *inter
     }
     count = duration * fps;
     if(!isfinite(count) || count > MAX_EXPORT_INTERVALS) {return(0);}
-    uncertainty = fmin(uncertainty * fps, 0.001);
-    boundary = floor(count);
+    uncertainty = fminl(uncertainty * fps, 0.001L);
+    boundary = floorl(count);
     if(boundary >= 1.0 && count - boundary <= uncertainty) {count = boundary;}
-    *intervals = (unsigned long long)ceil(count);
+    *intervals = (unsigned long long)ceill(count);
     return(1);
 }
 
@@ -57,6 +59,7 @@ int scene_export_frames(Scene *scene, const RenderConfig *config)
     Mobject *snapshot = NULL;
     ManicCamera camera;
     int initialized;
+    int edit_cursor;
     double elapsed;
     double action_elapsed;
     unsigned long long written = 0;
@@ -79,6 +82,7 @@ int scene_export_frames(Scene *scene, const RenderConfig *config)
     destination = malloc(path_size);
     camera = scene->camera;
     initialized = scene->timeline.initialized;
+    edit_cursor = scene->timeline.edit_cursor;
     elapsed = scene->timeline.elapsed;
     action_elapsed = scene->timeline.action_elapsed;
     if(path == NULL || stage == NULL || destination == NULL) {goto cleanup_path;}
@@ -212,6 +216,7 @@ cleanup_path:
         scene->camera = camera;
         timeline_invalidate_checkpoints(&scene->timeline);
         scene->timeline.current_action = 0;
+        scene->timeline.edit_cursor = edit_cursor;
         scene->timeline.action_started = 0;
         scene->timeline.action_elapsed = action_elapsed;
         scene->timeline.elapsed = elapsed;
